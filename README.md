@@ -9,14 +9,16 @@ Realtime audio gateway — nhận RTP/WebRTC từ hạ tầng IMS/telecom, xử 
 | Công cụ | Phiên bản tối thiểu | Ghi chú |
 |---------|---------------------|---------|
 | Go | 1.25 | |
-| GCC | bất kỳ | Bắt buộc cho CGO — pion/opus bundle Opus C source |
+| GCC / G++ | hỗ trợ C++17 | Bắt buộc cho CGO — video decoder (C++17 + FFmpeg), PCAP (`gopacket/afpacket`), AMR-WB (opencore) |
+| pkg-config | bất kỳ | CGO tìm FFmpeg qua pkg-config |
 
 ```bash
 # Ubuntu/Debian
-apt-get install build-essential
+apt-get install build-essential pkg-config
 
 # RedHat/CentOS
 yum groupinstall "Development Tools"
+yum install pkgconfig
 ```
 
 ### Chuẩn bị dependencies (vendor/)
@@ -38,10 +40,19 @@ Bắt buộc trước khi:
 
 | Thư viện | Ubuntu/Debian | RedHat/CentOS | Dùng cho |
 |----------|--------------|---------------|----------|
+| FFmpeg (libavcodec, libavutil, libswscale) | `libavcodec-dev libavutil-dev libswscale-dev` | `ffmpeg-devel` ¹ | Video H.264 decode (`internal/codec/video`) — **bắt buộc** |
+| Linux kernel headers | `linux-libc-dev` (có sẵn qua `build-essential`) | `kernel-headers` | PCAP capture (`gopacket/afpacket`) — **bắt buộc** |
 | opencore-amrwb | `libopencore-amrwb-dev` | `opencore-amr-devel` ¹ | AMR-WB decode |
 | opencore-amrnb | `libopencore-amrnb-dev` | `opencore-amr-devel` ¹ | AMR-NB decode (dự phòng) |
 
-> ¹ RedHat/CentOS: cài từ [RPM Fusion](https://rpmfusion.org/) hoặc build từ source tại [opencore-amr.sf.net](https://opencore-amr.sourceforge.net/).
+> ¹ RedHat/CentOS: cài từ [RPM Fusion](https://rpmfusion.org/) (FFmpeg, opencore-amr) hoặc build opencore-amr từ source tại [opencore-amr.sf.net](https://opencore-amr.sourceforge.net/).
+
+**Cài FFmpeg dev (Ubuntu/Debian):**
+```bash
+apt-get install libavcodec-dev libavutil-dev libswscale-dev
+```
+
+> Thiếu FFmpeg dev hoặc kernel headers thì không build được `cmd/media-ai-gateway`.
 
 **Cài opencore-amr (Ubuntu/Debian):**
 ```bash
@@ -131,6 +142,20 @@ kubectl apply -f deploy/k8s/configmap.yaml
 kubectl apply -f deploy/k8s/deployment.yaml
 kubectl apply -f deploy/k8s/service.yaml
 ```
+
+**Build args** (`deploy/Dockerfile`):
+
+| Arg | Default | Ý nghĩa |
+|-----|---------|---------|
+| `GO_TAGS` | `opencore_amrwb` | Build tag tính năng tuỳ chọn. `""` = tắt AMR-WB / AMR-NB |
+| `ALPINE_VERSION` | `3.22` | Version Alpine dùng chung cho stage build (`golang:1.25-alpine<ver>`) và runtime. Phải giống nhau vì binary CGO link động tới musl + FFmpeg `.so` |
+
+```bash
+# Ví dụ: build không có AMR-WB
+docker build -f deploy/Dockerfile --build-arg GO_TAGS="" -t registry.local/media-ai-gateway:latest .
+```
+
+> Image runtime có sẵn thư viện FFmpeg `.so` (không có binary `ffmpeg`), dung lượng khoảng 175MB.
 
 > Xem `deploy/k8s/network-attachment.yaml` để chỉnh `master` interface và subnet macvlan trước khi apply.
 
