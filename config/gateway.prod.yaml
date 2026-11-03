@@ -1,0 +1,101 @@
+# Media AI Gateway — cấu hình production với TLS + TURN
+# Dùng: media-ai-gateway --config config/gateway.prod.yaml
+
+gateway:
+  name: "media-ai-gateway"
+  id: "gw-prod-01"
+  raw_rtp_enabled: true
+  webrtc_enabled: true
+  mock_result_pump: false
+
+server:
+  http_addr: ":443"
+  public_url: "https://dcas.example.com"  # địa chỉ public của DCAS để DCSF gửi ctrl-result về
+  cert_file: "/etc/ssl/certs/gateway.crt"
+  key_file:  "/etc/ssl/private/gateway.key"
+  metrics_addr: ":9090"
+  shutdown_timeout_sec: 15
+
+rtp:
+  listen_addr: ":5004"
+  public_ip: "203.0.113.10"       # thay bằng public IP thực của node
+  port_start: 40000
+  port_end:   40999
+  socket_read_buffer: 8388608     # 8 MiB
+
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+  turn_servers:
+    - urls: ["turn:turn.example.com:3478", "turns:turn.example.com:5349"]
+      username: "gateway"
+      credential: "changeme"
+  nat1to1_ips:
+    - "203.0.113.10"
+  ice_port_min: 50000
+  ice_port_max: 50999
+
+session:
+  max_sessions: 10000
+  idle_timeout_sec: 30
+  gc_interval_sec: 5
+  per_session_packet_queue: 256
+  per_session_audio_queue: 80    # 80 × 100ms = 8s — đủ cover AI reconnect cycle (max 7s backoff)
+  per_session_result_queue: 32   # dispatcher xử lý nhanh, 32 là đủ
+  per_session_egress_queue: 200  # 200 × 20ms = 4s — egress pacer buffer cho TTS audio từ AI
+
+pipeline:
+  audio_worker_count: 32         # unused — per-session goroutine model
+  audio_job_queue_size: 32       # per-session job queue (packet đang chờ pipeline goroutine)
+  jitter_buffer_ms: 60
+  max_packet_late_ms: 120
+  packet_time_ms: 20
+  jitter_out_queue_size: 32
+
+audio:
+  output_sample_rate: 16000
+  output_channels: 1
+  chunk_ms: 100
+
+ai:
+  grpc_target: "ai-router.internal:50051"
+  max_active_streams: 2000
+  per_stream_queue_size: 32
+  send_timeout_ms: 500
+  stream_timeout_sec: 300
+  max_retry: 3
+  retry_backoff_ms: 1000
+
+result:
+  dispatcher_workers: 32
+  queue_size: 8192
+  drop_partial_when_full: true
+  send_timeout_ms: 2000
+
+# URL callback đến từ DCSF qua ctrl-result per-termination (callbackUrl trong tCore/tAccess).
+# url: pre-connect warm-up — đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 pool.
+callback:
+  # url: "http://mf-callback.internal:8090"  # bỏ comment để bật pre-connect warm-up
+  timeout_ms: 1000
+  max_retry: 3
+  retry_backoff_ms: 200
+
+dcsf:
+  hosts:
+    - host: "dcsf.internal"
+      port: 9090
+  call_control_timeout_ms: 30000
+
+log:
+  level: "info"
+  format: "json"
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

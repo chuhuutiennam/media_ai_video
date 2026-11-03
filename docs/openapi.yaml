@@ -1,0 +1,841 @@
+openapi: "3.0.3"
+
+info:
+  title: Media AI Gateway
+  version: "2.0.0"
+  description: |
+    Realtime audio gateway — nhận RTP/WebRTC từ hạ tầng IMS/telecom, xử lý audio,
+    gửi sang AI worker (STT/translate) qua gRPC streaming, trả kết quả về backend
+    qua HTTP callback hoặc WebRTC DataChannel.
+
+    **DCSF integration (v2):** Gateway tích hợp DCAS — nhận sự kiện cuộc gọi từ DCSF
+    tại `/v1/vonras/call-sessions/{callId}/...` thay cho `/v1/sessions` (v1).
+
+servers:
+  - url: http://localhost:8080
+    description: Control plane (HTTP/2 h2c)
+  - url: http://localhost:9090
+    description: Metrics server (Prometheus scrape target)
+
+tags:
+  - name: call-sessions
+    description: DCSF → DCAS — nhận sự kiện cuộc gọi từ DCSF, quản lý session audio
+  - name: webrtc
+    description: WebRTC signaling — offer/answer exchange
+  - name: gateway
+    description: Gateway cluster — heartbeat và registry
+  - name: health
+    description: Health probes cho Kubernetes liveness / readiness
+  - name: observability
+    description: Stats JSON và Prometheus metrics
+
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Call Sessions (DCSF → DCAS) ──────────────────────────────────────────
+
+  /v1/vonras/call-sessions/{callId}/notify-event:
+    post:
+      tags: [call-sessions]
+      summary: Nhận sự kiện cuộc gọi từ DCSF
+      description: |
+        DCSF gọi endpoint này để thông báo sự kiện IMS call tới DCAS.
+
+        - **BEGIN** — DCAS ghi nhận cuộc gọi, trả `200 OK` (không tạo session).
+        - **ANSWER** — DCAS tạo session audio, cấp RTP port, trả `local_non_dc_media`
+          để DCSF dùng làm `remoteNonDcMedia` khi gọi MF MRM `POST /contexts` (3GPP TS29.176).
+        - **Service chưa xử lý** (ví dụ `fun_calling`) — DCAS trả `200 OK`, không tạo session.
+      operationId: notifyEvent
+      parameters:
+        - $ref: "#/components/parameters/callId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionEvent"
+            examples:
+              begin:
+                summary: BEGIN event
+                value:
+                  callId: "p2uc31@[FC00:0DB8::]"
+                  event: "BEGIN"
+                  direction: "MT"
+                  role: "terminator"
+                  bearerCapability: "VIDEO"
+                  calling: "86156****5398"
+                  called: "86156****5399"
+              answer:
+                summary: ANSWER event — speech_to_text
+                value:
+                  callId: "p2uc31@[FC00:0DB8::]"
+                  event: "ANSWER"
+                  selectedService: "speech_to_text"
+                  direction: "MT"
+                  role: "terminator"
+                  bearerCapability: "VIDEO"
+                  location:
+                    areaNumber: "0755"
+                    ncgi: "46070094F34050"
+                    tac: "000002"
+                  calling: "86156****5398"
+                  called: "86156****5399"
+      responses:
+        "200":
+          description: |
+            BEGIN acknowledged — không tạo session. Cũng trả 200 cho service chưa xử lý.
+          content:
+            application/json:
+              schema:
+                type: object
+        "201":
+          description: ANSWER — session tạo thành công
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+              example:
+                session_id: "p2uc31@[FC00:0DB8::]"
+                status: "CREATED"
+                source_type: "raw_rtp"
+                codec: "PCMU"
+                sample_rate: 8000
+                channels: 1
+                task: "speech_to_text"
+                created_at: "2026-06-27T08:00:00Z"
+                gateway_id: "gw-node-1"
+                rtp_ip: "192.168.100.10"
+                tcore_rtp_port: 40000
+                taccess_rtp_port: 40001
+                tcore_local_non_dc_media:
+                  sdpmLine: "audio 40000 RTP/AVP 0"
+                  sdpaLines: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+                taccess_local_non_dc_media:
+                  sdpmLine: "audio 40001 RTP/AVP 0"
+                  sdpaLines: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: callId đã tồn tại (ANSWER đã được xử lý trước đó)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/vonras/call-sessions/{callId}/ctrl-result:
+    post:
+      tags: [call-sessions]
+      summary: Nhận kết quả media negotiation từ DCSF
+      description: |
+        DCSF forward `ctrl_result` từ IMS-AS sau khi SDP negotiation hoàn tất.
+        Gateway cập nhật `contextId`, `terminationId` cho mỗi termination và
+        thiết lập `callbackUrl` per-termination cho ASR result delivery.
+
+        **Cấu trúc `mediaResources`** theo 3GPP MRM (TS29.176): mỗi termination
+        có `contextId`, `termination.{terminationId, medias}` và `callbackUrl`
+        (DCSF extension — không có trong 3GPP spec).
+      operationId: ctrlResult
+      parameters:
+        - $ref: "#/components/parameters/callId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CtrlResultRequest"
+            example:
+              callId: "p2uc31@[FC00:0DB8::]"
+              mediaResources:
+                tCore:
+                  contextId: "ctx-core-001"
+                  termination:
+                    terminationId: "term-core-001"
+                    medias: []
+                  callbackUrl: "http://mf-callback.internal:8090/tcore"
+                tAccess:
+                  contextId: "ctx-access-001"
+                  termination:
+                    terminationId: "term-access-001"
+                    medias: []
+                  callbackUrl: "http://mf-callback.internal:8090/taccess"
+      responses:
+        "200":
+          description: Session cập nhật thành công
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/vonras/call-sessions/{callId}:
+    get:
+      tags: [call-sessions]
+      summary: Lấy thông tin session (debug)
+      operationId: getCallSession
+      parameters:
+        - $ref: "#/components/parameters/callId"
+      responses:
+        "200":
+          description: Thông tin session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [call-sessions]
+      summary: Đóng session (RELEASE)
+      description: |
+        DCSF gọi khi nhận RELEASE event từ IMS-AS.
+        Giải phóng pipeline, RTP port, AI stream. Idempotent — 404 nếu không tồn tại.
+      operationId: deleteCallSession
+      parameters:
+        - $ref: "#/components/parameters/callId"
+      responses:
+        "204":
+          description: Session đã được đóng
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ── WebRTC ────────────────────────────────────────────────────────────────
+
+  /v1/webrtc/offer:
+    post:
+      tags: [webrtc]
+      summary: WebRTC offer/answer exchange
+      description: |
+        Nhận SDP offer từ caller, tạo PeerConnection, trả SDP answer.
+
+        **Luồng:**
+        1. `POST /v1/webrtc/offer` với SDP offer → nhận SDP answer
+        2. ICE negotiation diễn ra giữa caller và gateway
+        3. Audio stream bắt đầu chạy qua pipeline
+      operationId: webrtcOffer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OfferRequest"
+            example:
+              session_id: "call-abc-002"
+              type: "offer"
+              sdp: "v=0\r\no=- 123456 2 IN IP4 127.0.0.1\r\n..."
+      responses:
+        "200":
+          description: SDP answer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnswerResponse"
+              example:
+                session_id: "call-abc-002"
+                type: "answer"
+                sdp: "v=0\r\no=- 654321 2 IN IP4 192.168.100.10\r\n..."
+                udp_proxy_port: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ── Gateway cluster ───────────────────────────────────────────────────────
+
+  /v1/gateways/{id}/heartbeat:
+    put:
+      tags: [gateway]
+      summary: Gateway node heartbeat
+      description: |
+        Gateway node gửi heartbeat định kỳ để cập nhật trạng thái tài nguyên
+        trong cluster registry. TTL mặc định 30 giây — node không heartbeat sẽ
+        bị coi là stale và loại khỏi danh sách định tuyến.
+      operationId: gatewayHeartbeat
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Gateway node ID
+          schema:
+            type: string
+          example: "gw-node-1"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GatewayInfo"
+            example:
+              id: "gw-node-1"
+              addr: "192.168.100.10:8080"
+              rtp_public_ip: "192.168.100.10"
+              sessions: 42
+              max_sessions: 100
+              ai_streams: 10
+              max_ai_streams: 50
+              cpu_usage: 0.35
+              audio_queue_usage: 0.12
+              rtp_port_start: 40000
+              rtp_port_end: 40999
+              used_ports: 42
+      responses:
+        "200":
+          description: Heartbeat nhận thành công
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  # ── Health ────────────────────────────────────────────────────────────────
+
+  /health/live:
+    get:
+      tags: [health]
+      summary: Kubernetes liveness probe
+      description: Luôn trả 200 khi process đang chạy.
+      operationId: healthLive
+      responses:
+        "200":
+          description: Process alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Kubernetes readiness probe
+      description: |
+        Trả 200 khi gateway sẵn sàng nhận traffic mới.
+        Trả 503 kèm lý do khi admission sẽ từ chối session:
+        - `session_limit` — sessions đạt max
+        - `ai_stream_limit` — AI streams đạt max
+        - `no_ai_worker` — không có AI worker nào khả dụng
+        - `queue_full` — worker pool queue đầy
+      operationId: healthReady
+      responses:
+        "200":
+          description: Gateway ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ready"
+        "503":
+          description: Gateway not ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "not_ready"
+                  reason:
+                    type: string
+                    example: "session_limit"
+                  retry_after_ms:
+                    type: integer
+                    format: int64
+                    example: 5000
+
+  # ── Observability ─────────────────────────────────────────────────────────
+
+  /v1/stats:
+    get:
+      tags: [observability]
+      summary: JSON stats snapshot
+      description: Snapshot tức thời các counter và gauge của gateway.
+      operationId: getStats
+      responses:
+        "200":
+          description: Stats snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+
+  /metrics:
+    get:
+      tags: [observability]
+      summary: Prometheus metrics
+      description: |
+        Prometheus text exposition format (version 0.0.4).
+
+        **Server:** port `:9090` khi `metrics_addr` khác `http_addr` trong config.
+        Nếu không cấu hình `metrics_addr`, endpoint này cũng available trên `:8080`.
+
+        **Metrics chính:**
+        | Metric | Type | Mô tả |
+        |--------|------|-------|
+        | `media_ai_sessions_active` | gauge | Sessions đang active |
+        | `media_ai_rtp_packets_total` | counter | RTP packets nhận từ UDP |
+        | `media_ai_rtp_packets_routed_total` | counter | Packets route thành công |
+        | `media_ai_pool_processed_total` | counter | Audio jobs processed |
+        | `media_ai_dispatcher_sent_total` | counter | Kết quả gửi callback |
+        | `media_ai_callback_retry_total` | counter | Callback retry attempts |
+        | `media_ai_ai_reconnects_total` | counter | AI gRPC reconnects |
+      operationId: getMetrics
+      servers:
+        - url: http://localhost:9090
+          description: Metrics server
+      responses:
+        "200":
+          description: Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: |
+                # HELP media_ai_sessions_active Active session count
+                # TYPE media_ai_sessions_active gauge
+                media_ai_sessions_active 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  parameters:
+    callId:
+      name: callId
+      in: path
+      required: true
+      description: Call session ID — callId từ DCSF (SIP URI hoặc hash)
+      schema:
+        type: string
+      example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
+
+  responses:
+    BadRequest:
+      description: Request không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource không tồn tại
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Lỗi server nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: Gateway quá tải hoặc không đủ tài nguyên
+      headers:
+        Retry-After:
+          description: Thời gian chờ khuyến nghị (giây)
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error: "service at capacity, try again later"
+            retry_after_ms: 5000
+
+  schemas:
+
+    # ── Shared ──────────────────────────────────────────────────────────────
+
+    TerminationInfo:
+      type: object
+      description: |
+        H.248 termination theo 3GPP TS29.176 `TerminationInfo` schema.
+        Gateway forward nguyên vẹn — không parse nội dung.
+      properties:
+        terminationId:
+          type: string
+          description: H.248 termination ID
+          example: "term-access-001"
+        medias:
+          type: array
+          description: |
+            Mảng `MediaInfo` theo 3GPP TS29.176 `MediaInfo` schema
+            (mediaId, mediaResourceType, localNonDcMedia, remoteNonDcMedia, ...).
+            Gateway nhận nhưng không parse — forward-compatible.
+          items:
+            $ref: "TS29176_Nmf_MRM.yaml#/components/schemas/MediaInfo"
+
+    MediaResourceInfo:
+      type: object
+      description: Một termination resource trong ctrl-result từ DCSF.
+      properties:
+        contextId:
+          type: string
+          description: H.248 context ID
+          example: "ctx-001"
+        termination:
+          $ref: "#/components/schemas/TerminationInfo"
+        callbackUrl:
+          type: string
+          format: uri
+          description: |
+            HTTP/2 endpoint nhận ASR results cho termination này (DCSF extension).
+            Gateway tạo `HTTPCallbackSink` khi field này không rỗng.
+          example: "http://mf-callback.internal:8090/taccess"
+
+    MediaResources:
+      type: object
+      description: Cặp termination H.248 — core-side và access-side.
+      properties:
+        tCore:
+          $ref: "#/components/schemas/MediaResourceInfo"
+        tAccess:
+          $ref: "#/components/schemas/MediaResourceInfo"
+
+    EventLocation:
+      type: object
+      description: Vị trí địa lý của UE trong sự kiện DCSF.
+      properties:
+        areaNumber:
+          type: string
+          example: "0755"
+        ncgi:
+          type: string
+          example: "46070094F34050"
+        tac:
+          type: string
+          example: "000002"
+
+    # ── Requests ────────────────────────────────────────────────────────────
+
+    SessionEvent:
+      type: object
+      required: [callId, event]
+      description: Sự kiện phiên từ DCSF.
+      properties:
+        callId:
+          type: string
+          description: SIP URI định danh cuộc gọi — dùng làm session ID
+          example: "p2uc31@[FC00:0DB8:0000:0000:0000:0000:0000:0000]"
+        event:
+          type: string
+          enum: [BEGIN, ANSWER]
+          description: Loại sự kiện
+          example: "ANSWER"
+        selectedService:
+          type: string
+          description: |
+            Dịch vụ đã chọn từ DCSF. Gateway sẽ tạo session cho:
+            `speech_to_text`, `realtime_translation` → PCMU/8000.
+            Các service khác (ví dụ `fun_calling`) → ACK không tạo session.
+          example: "speech_to_text"
+        direction:
+          type: string
+          enum: [MO, MT]
+          example: "MT"
+        role:
+          type: string
+          enum: [originator, terminator]
+          example: "terminator"
+        bearerCapability:
+          type: string
+          enum: [AUDIO, VIDEO]
+          description: Loại bearer. Cả AUDIO và VIDEO đều dùng PCMU/8000 cho STT.
+          example: "VIDEO"
+        location:
+          $ref: "#/components/schemas/EventLocation"
+        calling:
+          type: string
+          description: MSISDN của bên gọi
+          example: "86156****5398"
+        called:
+          type: string
+          description: MSISDN của bên nhận
+          example: "86156****5399"
+
+    CtrlResultRequest:
+      type: object
+      required: [callId]
+      description: |
+        Ctrl result từ IMS-AS forwarded bởi DCSF sau SDP negotiation.
+        `callbackUrl` per-termination là DCSF extension — không có trong 3GPP spec.
+      properties:
+        callId:
+          type: string
+          description: SIP URI định danh cuộc gọi — phải khớp với session ID đã tạo
+          example: "p2uc31@[FC00:0DB8::]"
+        mediaResources:
+          $ref: "#/components/schemas/MediaResources"
+
+    OfferRequest:
+      type: object
+      required: [session_id, sdp, type]
+      properties:
+        session_id:
+          type: string
+          description: Session ID
+          example: "call-abc-002"
+        sdp:
+          type: string
+          description: SDP offer body
+        type:
+          type: string
+          enum: [offer]
+          description: Phải là "offer"
+
+    GatewayInfo:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          description: Gateway node ID
+          example: "gw-node-1"
+        addr:
+          type: string
+          description: HTTP/2 control plane address của node này
+          example: "192.168.100.10:8080"
+        rtp_public_ip:
+          type: string
+          description: Public IP của macvlan/RTP interface
+          example: "192.168.100.10"
+        sessions:
+          type: integer
+          description: Sessions đang active
+          example: 42
+        max_sessions:
+          type: integer
+          example: 100
+        ai_streams:
+          type: integer
+          description: AI gRPC streams đang active
+          example: 10
+        max_ai_streams:
+          type: integer
+          example: 50
+        cpu_usage:
+          type: number
+          format: double
+          description: CPU usage 0..1
+          example: 0.35
+        audio_queue_usage:
+          type: number
+          format: double
+          description: Audio worker queue fill ratio 0..1
+          example: 0.12
+        rtp_port_start:
+          type: integer
+          example: 40000
+        rtp_port_end:
+          type: integer
+          example: 40999
+        used_ports:
+          type: integer
+          description: Per-session RTP ports đang sử dụng
+          example: 42
+        last_heartbeat_ms:
+          type: integer
+          format: int64
+          description: Unix timestamp ms do sender báo cáo
+
+    # ── Responses ───────────────────────────────────────────────────────────
+
+    SessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          description: Session ID (= callId = callId từ DCSF)
+          example: "p2uc31@[FC00:0DB8::]"
+        status:
+          type: string
+          enum: [CREATED, ACTIVE, CLOSED, ERROR]
+          example: "CREATED"
+        source_type:
+          type: string
+          enum: [raw_rtp, webrtc]
+          example: "raw_rtp"
+        codec:
+          type: string
+          example: "PCMU"
+        sample_rate:
+          type: integer
+          example: 8000
+        channels:
+          type: integer
+          example: 1
+        language:
+          type: string
+          example: "vi"
+        task:
+          type: string
+          description: selectedService từ DCSF (ví dụ speech_to_text, realtime_translation)
+          example: "speech_to_text"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-06-27T08:00:00Z"
+        gateway_id:
+          type: string
+          description: Node identity (chỉ có trong ANSWER CREATE response)
+          example: "gw-node-1"
+        rtp_ip:
+          type: string
+          description: Public IP để gửi RTP vào (chỉ có trong ANSWER CREATE response)
+          example: "192.168.100.10"
+        tcore_rtp_port:
+          type: integer
+          description: UDP port tCore stream (chỉ có trong ANSWER CREATE response, khi port pool được cấu hình)
+          example: 40000
+        taccess_rtp_port:
+          type: integer
+          description: UDP port tAccess stream (chỉ có trong ANSWER CREATE response, khi port pool được cấu hình)
+          example: 40001
+        tcore_local_non_dc_media:
+          $ref: "#/components/schemas/NonDcMedia"
+          description: |
+            SDP mô tả gateway RTP endpoint cho tCore (chỉ có trong ANSWER CREATE response, raw_rtp với port pool).
+            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts cho tCore termination (3GPP TS29.176).
+        taccess_local_non_dc_media:
+          $ref: "#/components/schemas/NonDcMedia"
+          description: |
+            SDP mô tả gateway RTP endpoint cho tAccess (chỉ có trong ANSWER CREATE response, raw_rtp với port pool).
+            DCSF dùng làm remoteNonDcMedia khi gọi MF MRM POST /contexts cho tAccess termination (3GPP TS29.176).
+
+    NonDcMedia:
+      type: object
+      description: SDP mô tả RTP endpoint theo định dạng 3GPP MRM (TS29.176).
+      required: [sdpmLine, sdpaLines]
+      properties:
+        sdpmLine:
+          type: string
+          description: Nội dung sau "m=" trong SDP m-line (không gồm "m=")
+          example: "audio 40000 RTP/AVP 0"
+        sdpaLines:
+          type: array
+          items:
+            type: string
+          description: Danh sách nội dung sau "a=" của các SDP a-line (không gồm "a=")
+          example: ["rtpmap:0 PCMU/8000", "ptime:20", "maxptime:20", "recvonly"]
+
+    AnswerResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          example: "call-abc-002"
+        sdp:
+          type: string
+          description: SDP answer body
+        type:
+          type: string
+          enum: [answer]
+          example: "answer"
+        udp_proxy_port:
+          type: integer
+          description: |
+            UDP proxy port cho IMS App Server → UE relay mode (AC.6-2).
+            0 = UDP proxy không được bật.
+          example: 0
+
+    StatsResponse:
+      type: object
+      properties:
+        sessions:
+          type: integer
+          description: Sessions đang active
+        ai_streams:
+          type: integer
+          description: AI gRPC streams đang active
+        pool:
+          $ref: "#/components/schemas/PoolStats"
+        dispatcher:
+          $ref: "#/components/schemas/DispatcherStats"
+        ai:
+          $ref: "#/components/schemas/AIStats"
+
+    PoolStats:
+      type: object
+      properties:
+        submitted:
+          type: integer
+          format: int64
+        dropped:
+          type: integer
+          format: int64
+        processed:
+          type: integer
+          format: int64
+        decode_errors:
+          type: integer
+          format: int64
+        active_sessions:
+          type: integer
+        queue_len:
+          type: integer
+
+    DispatcherStats:
+      type: object
+      properties:
+        pushed:
+          type: integer
+          format: int64
+        dropped:
+          type: integer
+          format: int64
+        sent:
+          type: integer
+          format: int64
+        sent_partial:
+          type: integer
+          format: int64
+        sent_final:
+          type: integer
+          format: int64
+        send_errors:
+          type: integer
+          format: int64
+        queue_len:
+          type: integer
+
+    AIStats:
+      type: object
+      properties:
+        total_send_errors:
+          type: integer
+          format: int64
+        total_recv_errors:
+          type: integer
+          format: int64
+        total_retries:
+          type: integer
+          format: int64
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "session not found"
+        retry_after_ms:
+          type: integer
+          format: int64
+          description: Thời gian chờ khuyến nghị trước khi retry (ms). 0 = không retry.
+          example: 5000

@@ -1,0 +1,35 @@
+# Binaries (anchored to root so cmd/media-ai-gateway/ source is not ignored)
+/media-ai-gateway
+/media-ai-gateway.exe
+/gateway
+/gateway.exe
+*.exe
+
+# Build output
+/dist/
+/bin/
+
+# Test artifacts
+*.test
+*.out
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go vendor (restore with: go mod vendor)
+/vendor/
+
+# Runtime output (PCM/WAV dumps from tests)
+/data/output/
+
+# Local backups / machine-specific settings
+/media_ai_video.zip
+.claude/settings.local.json

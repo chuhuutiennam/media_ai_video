@@ -1,0 +1,145 @@
+# Media AI Gateway — cấu hình High Availability (multi-node)
+#
+# Profile này dành cho triển khai nhiều node gateway song song:
+#
+#   Load Balancer (L4)
+#       ├── gw-ha-01 (node này)
+#       ├── gw-ha-02
+#       └── gw-ha-03
+#         ↓
+#   AI Router (cluster)  ──gRPC──►  AI Worker pool
+#
+# Mỗi node tự đăng ký vào GatewayRegistry qua heartbeat.
+# AI Router có thể query GET /v1/gateways để route session về đúng node.
+#
+# Lưu ý: session được gắn với node tạo ra nó (stateful per node).
+# Load balancer phải dùng sticky session (source IP hoặc session header)
+# sau khi session được tạo, để RTP và DELETE đến đúng node.
+#
+# Chạy node 1:
+#   GATEWAY_ID=gw-ha-01 ./bin/media-ai-gateway --config config/gateway-ha.yaml
+# Chạy node 2:
+#   GATEWAY_ID=gw-ha-02 ./bin/media-ai-gateway --config config/gateway-ha.yaml
+# (hoặc đặt gateway.id trực tiếp trong file — dùng biến môi trường cho K8s)
+
+gateway:
+  name: "media-ai-gateway"
+  id: "gw-ha-01"               # override per node (hoặc dùng env var / K8s downward API)
+  raw_rtp_enabled: true
+  webrtc_enabled: true
+  mock_result_pump: false
+
+# ── Control plane ─────────────────────────────────────────────────────────────
+server:
+  http_addr: ":8080"
+  public_url: "http://10.10.0.11:8080"  # IP của node này — DCSF gửi ctrl-result về đây; thay đổi theo node
+  cert_file: ""                 # h2c — TLS offload tại ingress/load balancer
+  key_file:  ""
+  metrics_addr: ":9090"
+  shutdown_timeout_sec: 30      # graceful shutdown lâu hơn để drain in-flight calls
+
+# ── Raw RTP ───────────────────────────────────────────────────────────────────
+# Mỗi node có dải port riêng để tránh conflict khi chạy trên cùng host (K8s HostNetwork).
+# Node 1: 30000–30999  |  Node 2: 31000–31999  |  Node 3: 32000–32999
+rtp:
+  listen_addr: ":5004"
+  public_ip:   "10.10.0.11"    # IP của node này, trả về trong rtp_ip của CREATE response
+  bind_ip:     "10.10.0.11"
+  port_start:  30000            # thay đổi theo node
+  port_end:    30999
+  socket_read_buffer: 8388608
+
+# ── WebRTC ────────────────────────────────────────────────────────────────────
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+  turn_servers:
+    - urls: ["turn:turn.internal:3478"]
+      username: "gateway"
+      credential: "changeme"
+  nat1to1_ips:
+    - "10.10.0.11"              # IP của node này
+  ice_port_min: 50000
+  ice_port_max: 50499           # 500 port ICE per node
+
+# ── Session manager ───────────────────────────────────────────────────────────
+session:
+  max_sessions:             2000   # per-node limit; tổng cluster = 2000 × N nodes
+  idle_timeout_sec:         30
+  gc_interval_sec:          5
+  per_session_packet_queue: 256
+  per_session_audio_queue:  256
+  per_session_result_queue: 128
+
+# ── Audio pipeline ────────────────────────────────────────────────────────────
+pipeline:
+  audio_worker_count:   16    # unused — per-session goroutine model
+  audio_job_queue_size: 32    # per-session job queue
+  jitter_buffer_ms:     60
+  max_packet_late_ms:   120
+  packet_time_ms:       20
+  jitter_out_queue_size: 16
+
+# ── Audio output ──────────────────────────────────────────────────────────────
+audio:
+  output_sample_rate: 16000
+  output_channels:    1
+  chunk_ms:           100
+
+# ── AI gRPC ───────────────────────────────────────────────────────────────────
+# AI Router cân bằng tải giữa các AI worker.
+# Tất cả gateway node trỏ đến cùng AI Router address.
+ai:
+  grpc_target:           "ai-router.internal:50051"
+  max_active_streams:    2000
+  per_stream_queue_size: 20
+  send_timeout_ms:       500
+  stream_timeout_sec:    300
+  max_retry:             3
+  retry_backoff_ms:      1000
+  keepalive_time_sec:    30   # PING mỗi 30s — quan trọng cho call dài có đoạn im lặng
+  keepalive_timeout_sec: 10   # đóng conn nếu không nhận PONG trong 10s
+
+# ── Result dispatcher ─────────────────────────────────────────────────────────
+result:
+  dispatcher_workers:    16
+  queue_size:            8192
+  drop_partial_when_full: true
+  send_timeout_ms:        2000
+
+# ── HTTP callback ─────────────────────────────────────────────────────────────
+# URL thực tế đến từ DCSF qua ctrl-result per-termination (callbackUrl trong tCore/tAccess).
+# url (optional): pre-connect warm-up — đặt trùng host với callbackUrl DCSF sẽ gửi.
+# Trong HA, tất cả node đều dùng chung H/2 transport → kết nối được pool per-host.
+callback:
+  # url: "http://mf-callback.internal:8090"  # bỏ comment để bật pre-connect warm-up
+  timeout_ms:            1000
+  max_retry:             3
+  retry_backoff_ms:      200
+  read_idle_timeout_ms:  30000  # gửi H/2 PING sau 30s idle để giữ kết nối qua NAT
+  ping_timeout_ms:       15000  # đóng connection nếu không nhận PONG trong 15s
+
+# ── DCSF outbound (CALL_CTRL) ─────────────────────────────────────────────────
+dcsf:
+  hosts:
+    - host: "dcsf-1.internal"
+      port: 9090
+    - host: "dcsf-2.internal"
+      port: 9090
+  call_control_timeout_ms: 30000
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log:
+  level: "info"
+  format: "json"
+  monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

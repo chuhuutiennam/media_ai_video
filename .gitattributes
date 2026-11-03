@@ -1,0 +1,10 @@
+# Force LF line endings for shell scripts so they work in Linux containers.
+*.sh text eol=lf
+
+# Keep CRLF for Windows-only files.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Auto-detect text files; let git decide.
+* text=auto

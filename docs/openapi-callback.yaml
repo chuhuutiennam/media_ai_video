@@ -1,0 +1,304 @@
+openapi: "3.0.3"
+
+info:
+  title: Media AI Gateway — Callback Receiver API
+  version: "1.0.0"
+  description: |
+    Spec này mô tả API mà **MF (Media Function)** phải implement để nhận kết quả ASR
+    từ Media AI Gateway qua HTTP/2 callback.
+
+    ## Vai trò
+
+    | Thành phần | Hành động |
+    |---|---|
+    | **DCAS** (IMS Application Server) | Tạo session trên gateway, cung cấp `callback_url` trỏ đến MF |
+    | **Media AI Gateway** | Gọi `POST {callback_url}` mỗi khi có kết quả ASR từ AI worker |
+    | **MF** (Media Function) | **Implement spec này** — expose HTTP/2 server để nhận callback |
+
+    ## Transport
+
+    - `http://` URL → **HTTP/2 cleartext (H2C, prior-knowledge)**. MF phải accept TCP connection
+      với HTTP/2 prior-knowledge (không cần Upgrade header từ HTTP/1.1).
+    - `https://` URL → **HTTP/2 over TLS** (ALPN negotiation).
+
+    > **HTTP/1.1 không được hỗ trợ.** MF không thể dùng reverse proxy HTTP/1.1
+    > trước callback endpoint nếu callback URL dùng `http://`.
+
+    ## Retry policy (phía gateway)
+
+    | HTTP status | Hành vi gateway |
+    |---|---|
+    | `2xx` | Thành công — không retry |
+    | `5xx` | Retry — có thể tự phục hồi |
+    | `4xx` | **Không retry** — lỗi cấu hình |
+    | Network error / timeout | Retry |
+
+    Mặc định: timeout 1s, tối đa 3 retry, backoff 200ms cố định.
+    Cấu hình qua `callback:` section trong gateway YAML.
+
+servers:
+  - url: http://mf-host:port
+    description: MF HTTP/2 server (H2C) — địa chỉ thực từ callback_url khi tạo session
+
+tags:
+  - name: asr
+    description: ASR recognition result callbacks từ gateway
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Path dưới đây là ví dụ representative. Đường dẫn thực tế là phần path trong
+# callback_url được DCAS cung cấp lúc tạo session (ví dụ: /asr-results, /callback, ...).
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  /asr-results:
+    post:
+      tags: [asr]
+      summary: Nhận kết quả ASR từ gateway
+      description: |
+        Gateway POST kết quả nhận dạng đến endpoint này **ngay khi nhận được** từ AI worker.
+        Mỗi request chứa đúng **một** `RecognitionResult` — không có batching.
+
+        **MF phải:**
+        - Trả `2xx` càng nhanh càng tốt (acknowledge rồi xử lý async).
+        - Timeout mặc định phía gateway là 1s — xử lý blocking sẽ làm tăng retry.
+        - Xử lý idempotency: cùng `(session_id, seq)` có thể đến nhiều lần do retry.
+
+        **Phân biệt partial vs final:**
+        - `is_final=false` (`event_type=asr.transcript.partial`): kết quả trung gian,
+          best-effort, có thể bị drop khi gateway quá tải. Dùng để hiển thị "live".
+        - `is_final=true` (`event_type=asr.transcript.final`): kết quả xác nhận,
+          được đảm bảo deliver. Dùng để lưu trữ và xử lý.
+
+        **Thứ tự:** Dùng field `seq` (tăng dần, per-stream) để sort nếu có reordering.
+      operationId: receiveAsrResult
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CallbackBody"
+            examples:
+              partial:
+                summary: Partial result (trung gian)
+                value:
+                  event_type: "asr.transcript.partial"
+                  session_id: "call-abc123"
+                  stream_id: "call-abc123"
+                  source_type: "raw_rtp"
+                  text: "xin chào..."
+                  is_final: false
+                  start_ms: 1782193409000
+                  end_ms: 1782193411500
+                  language: "vi"
+                  seq: 1
+              final:
+                summary: Final result (xác nhận)
+                value:
+                  event_type: "asr.transcript.final"
+                  session_id: "call-abc123"
+                  stream_id: "call-abc123"
+                  source_type: "raw_rtp"
+                  text: "Xin chào, tôi cần hỗ trợ."
+                  is_final: true
+                  start_ms: 1782193409000
+                  end_ms: 1782193415200
+                  confidence: 0.92
+                  language: "vi"
+                  seq: 3
+                  contextId: "ctx-002"
+                  terminationId: "term-access-001"
+                  mediaResources:
+                    tCore:
+                      contextId: "ctx-001"
+                      terminationId: "term-core-001"
+                    tAccess:
+                      contextId: "ctx-002"
+                      terminationId: "term-access-001"
+      responses:
+        "200":
+          description: Nhận thành công — gateway không retry
+        "204":
+          description: Nhận thành công (no content) — gateway không retry
+        "400":
+          description: |
+            Request không hợp lệ — **gateway không retry**.
+            Trả mã này khi body JSON sai format (thường không xảy ra với gateway đúng version).
+        "500":
+          description: |
+            Lỗi xử lý phía MF — **gateway sẽ retry** theo retry policy.
+            Trả mã này khi MF tạm thời không xử lý được (database down, queue full, ...).
+        "503":
+          description: |
+            MF tạm thời không khả dụng — **gateway sẽ retry**.
+            Nên kèm header `Retry-After` nếu biết thời gian phục hồi.
+          headers:
+            Retry-After:
+              description: Số giây khuyến nghị chờ trước khi retry
+              schema:
+                type: integer
+              example: 5
+
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+
+  schemas:
+
+    CallbackBody:
+      type: object
+      description: Kết quả nhận dạng từ AI worker, được gateway forward về MF.
+      required:
+        - event_type
+        - session_id
+        - stream_id
+        - source_type
+        - text
+        - is_final
+        - start_ms
+        - end_ms
+        - seq
+      properties:
+
+        event_type:
+          type: string
+          enum:
+            - asr.transcript.partial
+            - asr.transcript.final
+          description: |
+            Loại sự kiện:
+            - `asr.transcript.partial` — kết quả trung gian, `is_final=false`.
+              Có thể bị thay thế bởi partial hoặc final tiếp theo.
+            - `asr.transcript.final` — kết quả xác nhận, `is_final=true`.
+              Transcript hoàn chỉnh cho một đoạn lời nói.
+          example: "asr.transcript.final"
+
+        session_id:
+          type: string
+          description: |
+            ID session — bằng `callId` (callId từ DCSF notify-event ANSWER).
+            Dùng để phân biệt nguồn khi MF nhận callback từ nhiều session đồng thời.
+          example: "call-abc123"
+
+        stream_id:
+          type: string
+          description: |
+            ID stream trong session:
+            - `source_type=raw_rtp`: bằng `session_id`.
+            - `source_type=webrtc`: bằng WebRTC track ID.
+            Dùng để phân biệt nhiều track audio trong một session WebRTC.
+          example: "call-abc123"
+
+        source_type:
+          type: string
+          enum:
+            - raw_rtp
+            - webrtc
+          description: Loại nguồn audio.
+          example: "raw_rtp"
+
+        text:
+          type: string
+          description: |
+            Transcript nhận dạng:
+            - Partial: có thể rỗng hoặc là kết quả tạm thời đang cập nhật.
+            - Final: kết quả xác nhận cuối cho đoạn âm thanh, không thay đổi.
+          example: "Xin chào, tôi cần hỗ trợ."
+
+        is_final:
+          type: boolean
+          description: |
+            `false` = partial (trung gian, có thể thay đổi).
+            `true` = final (xác nhận, không thay đổi).
+            Luôn đồng nhất với `event_type`.
+          example: true
+
+        start_ms:
+          type: integer
+          format: int64
+          description: |
+            Unix timestamp (milliseconds) của thời điểm bắt đầu recognition window hiện tại.
+            Reset về `end_ms` của final trước sau mỗi kết quả `is_final=true`.
+          example: 1782193409000
+
+        end_ms:
+          type: integer
+          format: int64
+          description: |
+            Unix timestamp (milliseconds) khi AI worker trả về kết quả này.
+            Dùng kết hợp với `start_ms` để biết khoảng thời gian của đoạn audio.
+          example: 1782193415200
+
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: |
+            Độ tin cậy của kết quả nhận dạng [0.0, 1.0] do AI worker cung cấp.
+            **Omit** (không có trong JSON) nếu AI worker không trả về hoặc bằng 0.
+          example: 0.92
+
+        language:
+          type: string
+          description: |
+            Ngôn ngữ nhận dạng (BCP-47, ví dụ: `"vi"`, `"en"`, `"zh"`).
+            **Omit** (không có trong JSON) nếu AI worker không trả về.
+          example: "vi"
+
+        seq:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Số thứ tự tăng dần (monotonic) per stream, bắt đầu từ 1.
+            Partial và final chia sẻ cùng dãy seq.
+
+            Dùng để:
+            - Phát hiện callback bị mất (gap trong dãy seq).
+            - Sort lại nếu mạng gây reordering.
+            - Deduplicate khi retry gửi cùng một kết quả nhiều lần
+              (cùng `session_id` + `seq` = cùng một kết quả).
+          example: 3
+
+        contextId:
+          type: string
+          description: |
+            H.248 context ID — flattened từ `mediaResources.tAccess.contextId`
+            (fallback sang `tCore` nếu tAccess chưa được cập nhật).
+            Omit nếu DCSF chưa gọi ctrl-result.
+          example: "ctx-002"
+        terminationId:
+          type: string
+          description: |
+            H.248 termination ID — flattened từ `mediaResources.tAccess.terminationId`
+            (fallback sang `tCore` nếu tAccess chưa được cập nhật).
+            Omit nếu DCSF chưa gọi ctrl-result.
+          example: "term-access-001"
+        mediaResources:
+          description: |
+            H.248/MEGACO termination info của session — được cập nhật qua
+            `POST .../ctrl-result`. Omit nếu DCSF chưa gọi ctrl-result.
+            MF dùng để correlate kết quả ASR về đúng H.248 context/termination.
+          allOf:
+            - $ref: "#/components/schemas/MediaResources"
+
+    MediaResource:
+      type: object
+      description: H.248/MEGACO media termination identifier (flat, trong callback payload).
+      properties:
+        contextId:
+          type: string
+          description: H.248 context ID
+          example: "ctx-001"
+        terminationId:
+          type: string
+          description: H.248 termination ID
+          example: "term-access-001"
+
+    MediaResources:
+      type: object
+      description: Cặp termination H.248 — core-side và access-side.
+      properties:
+        tCore:
+          $ref: "#/components/schemas/MediaResource"
+        tAccess:
+          $ref: "#/components/schemas/MediaResource"

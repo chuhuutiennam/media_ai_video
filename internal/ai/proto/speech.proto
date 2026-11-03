@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package speech;
+
+option go_package = "media-ai-gateway/internal/ai/proto";
+
+// SpeechStream là gRPC service mà AI worker phải implement.
+// Gateway là client; AI worker là server.
+//
+// Wire encoding: protobuf binary (content-type: application/grpc+proto).
+// Gateway encode/decode thủ công bằng protowire — không cần compile proto này.
+// File này là contract documentation cho AI worker.
+service SpeechStream {
+  // Recognize nhận stream AudioChunk từ gateway và trả stream RecognitionResult.
+  // Stream kết thúc khi client gọi CloseSend() (end_of_stream=true trong chunk cuối).
+  rpc Recognize(stream AudioChunk) returns (stream RecognitionResult);
+}
+
+// AudioChunk là một đoạn audio PCM 16kHz mono gửi sang AI worker.
+message AudioChunk {
+  string session_id     = 1;  // session ID của gateway
+  string stream_id      = 2;  // stream ID (thường = track_id hoặc SSRC hex)
+  bytes  pcm            = 3;  // PCM S16LE raw bytes
+  int32  sample_rate    = 4;  // Hz (thường 16000)
+  int32  channels       = 5;  // kênh (thường 1 = mono)
+  uint32 rtp_timestamp  = 6;  // RTP timestamp của packet đầu tiên trong chunk (đơn vị: rtp_clock_rate)
+  int64  duration_ms    = 7;  // thời lượng chunk (ms)
+  bool   end_of_stream  = 8;  // true = chunk cuối, đóng stream sau khi nhận
+  string language       = 9;  // mã ngôn ngữ BCP-47, ví dụ "vi", "en"
+  string task           = 10; // "speech_to_text" | "realtime_translation"
+  int32  rtp_clock_rate = 11; // clock rate của RTP stream gốc (Hz, e.g. 8000, 48000); 0 = unknown
+  uint64 chunk_seq      = 12; // monotonic sequence per stream (0-based); detect lost/reorder
+}
+
+// RecognitionResult là kết quả ASR cho một đoạn audio.
+// Nếu audio_payload != nil, gateway sẽ gửi audio này về MF qua RTP egress
+// song song với việc dispatch text sang HTTP callback.
+message RecognitionResult {
+  string session_id    = 1;  // echo lại session_id từ AudioChunk
+  string stream_id     = 2;  // echo lại stream_id
+  string text          = 3;  // văn bản nhận dạng
+  bool   is_final      = 4;  // false = partial; true = kết quả cuối của đoạn
+  int64  ts_start      = 5;  // RTP timestamp bắt đầu đoạn (samples)
+  int64  ts_end        = 6;  // RTP timestamp kết thúc đoạn (samples)
+  float  confidence    = 7;  // 0..1; 0 nếu model không cung cấp
+  string language      = 8;  // ngôn ngữ thực tế nhận dạng được
+  uint64 seq           = 9;  // số thứ tự tăng dần per-session
+  bytes  audio_payload = 10; // audio đã encode (PCMU/PCMA) để gửi về MF qua RTP; bỏ trống = text-only
+  uint32 audio_pt      = 11; // RTP payload type của audio_payload (e.g. 0=PCMU, 8=PCMA); bỏ trống = 0
+}

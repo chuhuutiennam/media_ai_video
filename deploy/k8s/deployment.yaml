@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: media-ai-gateway
+  namespace: media
+  labels:
+    app: media-ai-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: media-ai-gateway
+  template:
+    metadata:
+      labels:
+        app: media-ai-gateway
+      annotations:
+        # Multus: gắn secondary NIC macvlan cho RTP traffic
+        k8s.v1.cni.cncf.io/networks: media-ai-macvlan
+    spec:
+      # Init container: phát hiện IP của macvlan interface (net1) và ghi vào shared volume
+      initContainers:
+        - name: detect-rtp-ip
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              ip addr show net1 \
+                | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' \
+                | awk '{print $2}' \
+                > /rtp-ip/public_ip
+              echo "Detected RTP public IP: $(cat /rtp-ip/public_ip)"
+          volumeMounts:
+            - name: rtp-ip
+              mountPath: /rtp-ip
+
+      containers:
+        - name: gateway
+          image: registry.local/media-ai-gateway:latest
+          imagePullPolicy: IfNotPresent
+          # Shell wrapper đọc macvlan IP từ file rồi export làm env var trước khi exec binary
+          command:
+            - /bin/sh
+            - -c
+            - |
+              export GATEWAY_RTP_PUBLIC_IP=$(cat /rtp-ip/public_ip 2>/dev/null || echo "")
+              export GATEWAY_RTP_BIND_IP=$GATEWAY_RTP_PUBLIC_IP
+              exec /media-ai-gateway --config=/etc/gateway/gateway.yaml
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+            - name: rtp-shared
+              containerPort: 5004
+              protocol: UDP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/gateway
+              readOnly: true
+            - name: rtp-ip
+              mountPath: /rtp-ip
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+
+      volumes:
+        - name: config
+          configMap:
+            name: media-ai-gateway-config
+            items:
+              - key: gateway.yaml
+                path: gateway.yaml
+        - name: rtp-ip
+          emptyDir: {}

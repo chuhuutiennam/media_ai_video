@@ -1,0 +1,54 @@
+# Media AI Gateway — cấu hình development (override lên gateway.yaml)
+# Dùng: media-ai-gateway --config config/gateway.dev.yaml
+
+gateway:
+  name: "media-ai-gateway-dev"
+  id: "gw-dev"
+  mock_result_pump: false  # đổi thành true để test luồng callback MF mà không cần AI worker
+
+server:
+  http_addr: ":8080"
+  public_url: "http://localhost:8080"  # địa chỉ DCAS để DCSF gửi ctrl-result về (dev)
+  metrics_addr: ":9090"   # server metrics riêng để test scrape
+  shutdown_timeout_sec: 5
+
+rtp:
+  listen_addr: ":5004"
+  # port_start/port_end để mặc định 0 → chỉ dùng shared ingress
+
+session:
+  max_sessions: 100
+  idle_timeout_sec: 60
+
+pipeline:
+  audio_worker_count: 4      # unused — per-session goroutine model
+  audio_job_queue_size: 32   # per-session job queue
+  jitter_buffer_ms: 40
+  jitter_out_queue_size: 16
+
+audio:
+  chunk_ms: 100
+
+ai:
+  grpc_target: "localhost:50051"
+  max_active_streams: 50
+  send_timeout_ms: 1000
+  max_retry: 1
+
+result:
+  dispatcher_workers: 4
+  queue_size: 256
+
+log:
+  level: "debug"
+  format: "text"   # dễ đọc hơn khi dev
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

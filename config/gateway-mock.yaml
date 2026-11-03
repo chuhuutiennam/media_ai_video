@@ -1,0 +1,114 @@
+# Media AI Gateway — cấu hình test với mock-ai-worker
+#
+# Dùng: media-ai-gateway --config config/gateway-mock.yaml
+#
+# Yêu cầu: mock-ai-worker đang chạy tại 127.0.0.1:50051
+#   ./mock-ai-worker --addr :50051 --log-level debug
+#
+# Lab scripts:
+#   bash scripts/lab-rtp-test.sh          — basic RTP test (200 packets)
+#   bash scripts/test-callback-e2e.sh     — self-contained E2E callback (tự build + chạy)
+#   bash scripts/test-pcm-real-ai.sh      — G.711 60s + real AI + callback
+#   bash scripts/test-real-ai-g711.sh     — G.711 + real AI + PATCH mediaResources
+#
+# Nếu lab server có IP khác 127.0.0.1, sửa rtp.public_ip và chạy:
+#   bash scripts/lab-rtp-test.sh <LAB_IP> 8080
+
+gateway:
+  name: "media-ai-gateway"
+  id: "gw-mock"
+  raw_rtp_enabled: true
+  webrtc_enabled: false   # tắt WebRTC cho test RTP đơn giản
+  mock_result_pump: true  # bật giả lập ASR result 1s/lần → gửi về MF sau khi nhận ctrl-result
+
+server:
+  http_addr: ":8080"
+  public_url: "http://127.0.0.1:8080"  # địa chỉ DCAS để DCSF gửi ctrl-result về; đổi thành IP lab nếu DCSF ở máy khác
+  # metrics_addr để trống → /metrics phục vụ trên cùng port 8080
+  # lab-rtp-test.sh mặc định METRICS_PORT=GW_PORT nên không cần thay đổi
+  shutdown_timeout_sec: 5
+
+rtp:
+  listen_addr: ":5004"
+  public_ip: "127.0.0.1"   # đổi thành IP lab server nếu gửi từ máy khác
+  bind_ip: ""               # bind tất cả interface
+  port_start: 40000
+  port_end:   40099         # 100 per-session ports
+  socket_read_buffer: 2097152  # SO_RCVBUF 2 MiB — đủ cho lab (production dùng 4 MiB)
+
+session:
+  max_sessions: 50
+  idle_timeout_sec: 60      # 60s để tránh GC giữa các bước test
+  gc_interval_sec: 5
+  per_session_packet_queue: 256
+  per_session_audio_queue:  128
+  per_session_result_queue: 64
+  per_session_egress_queue: 200  # 200 × 20ms = 4s — egress pacer buffer cho TTS audio từ AI
+
+pipeline:
+  audio_worker_count: 4      # unused — per-session goroutine model
+  audio_job_queue_size: 32   # per-session job queue
+  jitter_buffer_ms: 60
+  max_packet_late_ms: 120
+  packet_time_ms: 20
+  jitter_out_queue_size: 16
+
+audio:
+  output_sample_rate: 16000
+  output_channels: 1
+  chunk_ms: 100             # 100ms/chunk → cần 5 RTP packets (PCMU 8kHz 20ms)
+  # PCM dump: ghi raw decoded PCM (int16-LE, native codec rate) để verify transcode.
+  # Phát lại: ffplay -f s16le -ar 8000 -ac 1 data/output/pcm/<session>.pcmu.8000hz.1ch.s16le
+  # Tắt trên production (để trống hoặc xóa dòng này).
+  pcm_dump_dir: "data/output/pcm"
+
+ai:
+  grpc_target: "127.0.0.1:50051"   # mock-ai-worker
+  max_active_streams: 100
+  per_stream_queue_size: 20
+  send_timeout_ms: 1000     # 1s timeout per gRPC Send
+  stream_timeout_sec: 300
+  max_retry: 2
+  retry_backoff_ms: 500
+  keepalive_time_sec: 30
+  keepalive_timeout_sec: 10
+
+result:
+  dispatcher_workers: 4
+  queue_size: 256
+  drop_partial_when_full: true
+  send_timeout_ms: 2000
+
+# ── HTTP callback sink ─────────────────────────────────────────────────────────
+# url: pre-connect (warm-up H/2) tới callback server khi gateway khởi động.
+#   — KHÔNG phải URL dùng để gửi kết quả; URL đó đến từ DCSF qua ctrl-result
+#     (mediaResources.tCore.callbackUrl / mediaResources.tAccess.callbackUrl).
+#   — Nên đặt trùng host với callbackUrl mà DCSF sẽ gửi để tận dụng H/2 connection pool.
+# Khi url được đặt, gateway log: {"msg":"callback: preconnected via HTTP/2",...}
+# Để trống nếu DCSF callback tới nhiều host khác nhau hoặc không cần warm-up.
+callback:
+  url: "http://127.0.0.1:9999"  # mock-callback-server preconnect; để trống nếu không test callback
+  timeout_ms: 5000       # timeout rộng hơn cho lab (mock-callback-server đôi khi chậm)
+  max_retry: 1           # ít retry hơn để test fail nhanh
+  retry_backoff_ms: 100
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle
+  ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong 15s
+
+dcsf:
+  hosts: []                      # để trống khi test; pool sẽ tạo động từ callbackUrl trong ANSWER
+  call_control_timeout_ms: 30000
+
+log:
+  level: "info"   # đổi "debug" để xem chi tiết từng bước pipeline
+  format: "json"
+  monitor_interval_sec: 30  # in thống kê mỗi 30s khi test
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

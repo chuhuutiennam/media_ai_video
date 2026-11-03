@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: media-ai-gateway-config
+  namespace: media
+data:
+  gateway.yaml: |
+    gateway:
+      name: "media-ai-gateway"
+      id: "gw-01"
+      raw_rtp_enabled: true
+      webrtc_enabled: true
+
+    server:
+      http_addr: ":8080"
+      metrics_addr: ":9090"
+      shutdown_timeout_sec: 10
+
+    rtp:
+      listen_addr: ":5004"
+      # public_ip: được inject qua env GATEWAY_RTP_PUBLIC_IP (macvlan IP của pod)
+      # bind_ip:   "" = bind tất cả interface, kể cả net1 (macvlan)
+      public_ip: ""
+      bind_ip: ""
+      port_start: 40000
+      port_end: 40999
+      socket_read_buffer: 4194304
+
+    session:
+      max_sessions: 10000
+      idle_timeout_sec: 30
+      gc_interval_sec: 5
+      per_session_packet_queue: 128
+      per_session_audio_queue: 128
+      per_session_result_queue: 64
+
+    pipeline:
+      audio_worker_count: 16
+      audio_job_queue_size: 8192
+      jitter_buffer_ms: 60
+      max_packet_late_ms: 120
+      packet_time_ms: 20
+
+    audio:
+      output_sample_rate: 16000
+      output_channels: 1
+      chunk_ms: 500
+
+    ai:
+      grpc_target: "ai-router:50051"
+      max_active_streams: 1000
+      per_stream_queue_size: 20
+      send_timeout_ms: 500
+      stream_timeout_sec: 300
+      max_retry: 3
+      retry_backoff_ms: 1000
+
+    result:
+      dispatcher_workers: 16
+      queue_size: 4096
+      drop_partial_when_full: true
+      send_timeout_ms: 2000
+
+    callback:
+      timeout_ms: 1000
+      max_retry: 3
+      retry_backoff_ms: 200
+
+    log:
+      level: "info"
+      format: "json"

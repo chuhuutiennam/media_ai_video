@@ -1,0 +1,135 @@
+# Media AI Gateway — cấu hình production
+# Tất cả field đều optional: field thiếu giữ nguyên giá trị default trong code.
+# Tham khảo internal/config/config.go để xem toàn bộ struct và default value.
+
+# ── Node identity ──────────────────────────────────────────────────────────────
+gateway:
+  name: "media-ai-gateway"   # tên hiển thị trong log và registry
+  id: "gw-01"                # định danh node, trả về trong mỗi CREATE response
+  raw_rtp_enabled: true      # bật Raw RTP UDP ingress
+  webrtc_enabled: true       # bật WebRTC ingress (Pion)
+  mock_result_pump: false    # giả lập ASR result 1s/lần (chỉ bật khi test MF, tắt trên production)
+
+# ── HTTP/2 control plane ───────────────────────────────────────────────────────
+server:
+  http_addr: ":8080"         # địa chỉ lắng nghe control plane (h2c hoặc TLS+h2)
+  public_url: ""             # địa chỉ public của DCAS, dùng làm callbackUrl trong CALL_CTRL gửi DCSF
+                             # ví dụ: "http://10.0.0.1:8080" hoặc "https://dcas.internal:8443"
+  cert_file: ""              # đường dẫn TLS cert PEM; để trống → dùng h2c cleartext
+  key_file:  ""              # đường dẫn TLS key PEM
+  metrics_addr: ""           # nếu khác http_addr → chạy server metrics riêng, vd ":9090"
+  shutdown_timeout_sec: 10   # thời gian chờ graceful shutdown (giây)
+
+# ── Raw RTP UDP ingress ────────────────────────────────────────────────────────
+rtp:
+  listen_addr: ":5004"          # cổng UDP shared ingress
+  public_ip: ""                 # IP public advertise cho caller (per-session port)
+  bind_ip: ""                   # IP local bind per-session UDP socket; "" = all interfaces
+  port_start: 0                 # giới hạn dưới pool cổng per-session (0 = disabled)
+  port_end:   0                 # giới hạn trên pool cổng per-session
+  socket_read_buffer: 4194304   # SO_RCVBUF socket buffer (bytes, default 4 MiB)
+
+# ── WebRTC ingress (Pion) ──────────────────────────────────────────────────────
+webrtc:
+  stun_servers:
+    - "stun:stun.l.google.com:19302"
+  turn_servers: []
+  # turn_servers:
+  #   - urls: ["turn:turn.example.com:3478"]
+  #     username: "user"
+  #     credential: "pass"
+  nat1to1_ips: []    # danh sách IP NAT 1:1 để override ICE candidate
+  ice_port_min: 0    # giới hạn port ICE (0 = không giới hạn)
+  ice_port_max: 0
+  # dc_proxy_url: ""  # IMS Data Channel Mode 2.1 (HTTP Proxy):
+  #                   # UE → DataChannel (SCTP/DTLS) → Gateway → HTTP POST → DC App Server
+  #                   # Khi được đặt, mọi message từ UE qua DataChannel sẽ được forward
+  #                   # tới URL này (kèm header X-Session-ID). Để trống = tắt.
+  #                   # Ví dụ: "http://dc-app-server:8090/dc/messages"
+  # dc_udp_proxy_addr: ""  # IMS Data Channel Mode 2.2 (UDP Proxy, AC.6-2):
+  #                        # UE ↔ DataChannel (SCTP/DTLS) ↔ Gateway UDP socket ↔ DC App Server
+  #                        # Gateway cấp phát UDP port ngẫu nhiên; trả về trong AnswerResponse.udp_proxy_port
+  #                        # để App Server biết địa chỉ gửi datagram ngược lại.
+  #                        # Ưu tiên hơn dc_proxy_url nếu cả hai được đặt.
+  #                        # Để trống = tắt. Ví dụ: "dc-app-server:9000"
+
+# ── Session manager ────────────────────────────────────────────────────────────
+session:
+  max_sessions: 10000          # số session tối đa đồng thời
+  idle_timeout_sec: 30         # session tự đóng nếu không nhận packet sau N giây
+  gc_interval_sec: 5           # chu kỳ garbage-collect session idle (giây)
+  per_session_packet_queue: 128  # kích thước queue RTP packet per-session
+  per_session_audio_queue: 128   # kích thước queue audio chunk per-session
+  per_session_result_queue: 64   # kích thước queue ASR result per-session
+
+# ── Audio pipeline & jitter buffer ────────────────────────────────────────────
+pipeline:
+  audio_worker_count: 16     # unused — per-session goroutine model; giữ để tương thích config
+  audio_job_queue_size: 32   # per-session job queue (packet đang chờ pipeline goroutine)
+  jitter_buffer_ms: 60       # độ trễ jitter buffer (ms)
+  max_packet_late_ms: 120    # packet đến muộn hơn ngưỡng này bị drop (ms)
+  packet_time_ms: 20         # kích thước gói RTP chuẩn (ms, dùng tính sequence)
+  jitter_out_queue_size: 16  # cap channel jitter buffer → WorkerPool
+
+# ── Audio output format ────────────────────────────────────────────────────────
+audio:
+  output_sample_rate: 16000  # sample rate sau resample gửi AI (Hz)
+  output_channels: 1         # số kênh output (1 = mono)
+  chunk_ms: 100              # kích thước chunk âm thanh gửi AI (ms)
+
+# ── AI gRPC connection ─────────────────────────────────────────────────────────
+ai:
+  grpc_target: "ai-router:50051"  # địa chỉ AI router hoặc worker (host:port)
+  max_active_streams: 1000        # số gRPC stream tối đa đồng thời
+  per_stream_queue_size: 20       # buffer gói gửi per-stream
+  send_timeout_ms: 500            # timeout gửi một gói lên stream (ms)
+  stream_timeout_sec: 300         # timeout toàn bộ stream từ lúc mở (giây)
+  max_retry: 3                    # số lần retry khi stream lỗi
+  retry_backoff_ms: 1000          # thời gian chờ giữa các lần retry (ms)
+  keepalive_time_sec: 30          # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
+  keepalive_timeout_sec: 10       # đóng conn nếu không nhận PONG trong N giây
+
+# ── Result dispatcher ──────────────────────────────────────────────────────────
+result:
+  dispatcher_workers: 16        # số goroutine gửi result song song
+  queue_size: 4096              # kích thước queue result toàn cục
+  drop_partial_when_full: true  # drop partial result khi queue đầy (giữ lại final)
+  send_timeout_ms: 2000         # timeout gửi một result tới sink (ms)
+
+# ── HTTP callback sink ─────────────────────────────────────────────────────────
+# URL thực tế để gửi ASR transcript đến từ DCSF qua ctrl-result, per-termination:
+#   mediaResources.tCore.callbackUrl   → session {callId}-tcore
+#   mediaResources.tAccess.callbackUrl → session {callId}-taccess
+# Tất cả session cùng callback host tái sử dụng chung 1 kết nối H/2 duy nhất.
+callback:
+  url: ""                      # optional: pre-connect (warm-up H/2) khi khởi động — không phải URL gửi kết quả
+                               # nên đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 pool
+                               # ví dụ: "http://mf-callback.internal:8090"
+  timeout_ms: 1000             # timeout một HTTP POST callback (ms)
+  max_retry: 3                 # số lần retry khi callback thất bại
+  retry_backoff_ms: 200        # thời gian chờ giữa các lần retry callback (ms)
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau N ms idle để giữ kết nối; 0 = không ping
+  ping_timeout_ms: 15000       # đóng connection nếu không nhận PONG trong N ms
+
+# ── DCSF outbound (CALL_CTRL) ──────────────────────────────────────────────────
+# hosts: danh sách DCSF node để tạo H/2 pool và pre-warm khi khởi động.
+# Host trong callbackUrl từ ANSWER sẽ tự động tạo pool nếu chưa có trong danh sách.
+dcsf:
+  hosts: []                      # ví dụ: [{host: "dcsf.internal", port: 9090}]
+  call_control_timeout_ms: 30000 # timeout POST CALL_CTRL (ms); cần lớn vì DCSF block chờ CALL_RESULT
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+log:
+  level: "info"    # debug | info | warn | error
+  format: "json"   # json | text
+  monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

@@ -1,0 +1,28 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: media-ai-macvlan
+  namespace: media
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "name": "media-ai-macvlan",
+      "type": "macvlan",
+      "master": "eth1",
+      "mode": "bridge",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "192.168.100.0/24",
+        "exclude": [
+          "192.168.100.0/32",
+          "192.168.100.255/32"
+        ]
+      }
+    }
+# Chỉnh trước khi apply:
+#   master  — tên interface vật lý trên node dùng làm uplink RTP (vd: eth1, ens3)
+#   range   — subnet macvlan dành cho RTP traffic
+#
+# Yêu cầu: Multus CNI và Whereabouts IPAM đã được cài trên cluster.
+# Whereabouts: https://github.com/k8snetworkplumbingwg/whereabouts

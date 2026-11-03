@@ -1,0 +1,144 @@
+# Media AI Gateway — cấu hình IMS/Telecom deployment
+#
+# Profile này dành cho triển khai trong hạ tầng IMS:
+#
+#   DCAS (IMS AS) ──POST /v1/sessions──► Gateway  (tạo session, cung cấp callback_url → MF)
+#
+#   MF  ──RTP──►  Gateway  ──gRPC──►  AI Worker (STT)
+#                    │                      │
+#                    └──gRPC result─────────┘
+#                    │
+#                    └──HTTP/2 callback──►  MF HTTP/2 server (nhận kết quả ASR)
+#
+# Đặc điểm:
+#   - Per-session UDP port pool để SBC/B2BUA gửi RTP trực tiếp đến đúng port
+#   - AMR-WB / AMR-NB codec (cần build với -tags opencore_amrwb)
+#   - WebRTC tắt (IMS dùng RTP thuần, không cần ICE/DTLS)
+#   - Callback về IMS AS qua H2C (AS thường nằm trong cùng internal network)
+#   - TLS control plane để gateway expose ra ngoài SBC zone
+#
+# Build với AMR-WB:
+#   CGO_ENABLED=1 go build -tags opencore_amrwb -o bin/media-ai-gateway ./cmd/media-ai-gateway
+#
+# Chạy:
+#   ./bin/media-ai-gateway --config config/gateway-ims.yaml
+
+gateway:
+  name: "media-ai-gateway-ims"
+  id: "gw-ims-01"               # mỗi node cần ID riêng trong multi-node
+  raw_rtp_enabled: true          # Raw RTP từ SBC
+  webrtc_enabled: false          # không cần WebRTC trong IMS core
+  mock_result_pump: false        # không giả lập trong production IMS
+
+# ── Control plane (TLS, expose cho SBC management) ───────────────────────────
+server:
+  http_addr: ":8443"
+  public_url: "https://10.10.1.5:8443"  # địa chỉ public của DCAS nhìn từ DCSF — để DCSF gửi ctrl-result về đây
+  cert_file: "/etc/tls/gateway.crt"     # cert signed bởi internal CA
+  key_file:  "/etc/tls/gateway.key"
+  metrics_addr: ":9090"                 # Prometheus scrape trên port riêng
+  shutdown_timeout_sec: 15
+
+# ── Raw RTP — per-session port pool ──────────────────────────────────────────
+# SBC cần biết địa chỉ RTP endpoint từng session → dùng per-session port.
+# Luồng: POST /v1/sessions → gateway trả rtp_port → SBC gửi RTP đến port đó.
+rtp:
+  listen_addr:         ":5004"        # shared fallback (không dùng nếu port pool đủ)
+  public_ip:           "10.10.1.5"   # IP của gateway nhìn từ SBC (thay giá trị thực)
+  bind_ip:             "10.10.1.5"   # bind per-session socket vào interface cụ thể
+  port_start:          20000          # dải port RTP per-session
+  port_end:            29999          # 10000 port = 10000 session đồng thời tối đa
+  socket_read_buffer:  8388608        # 8 MiB — tránh mất packet burst từ SBC
+
+# ── WebRTC — tắt ─────────────────────────────────────────────────────────────
+webrtc:
+  stun_servers: []
+  turn_servers: []
+  nat1to1_ips:  []
+
+# ── Session manager ───────────────────────────────────────────────────────────
+session:
+  max_sessions:             5000    # giới hạn theo capacity AI worker
+  idle_timeout_sec:         60      # SBC có thể giữ session open dài hơn sau im lặng
+  gc_interval_sec:          10
+  per_session_packet_queue: 256     # buffer lớn hơn cho IMS — SBC có thể burst
+  per_session_audio_queue:  80      # 80 × 100ms = 8s — đủ cover AI reconnect cycle (max 7s backoff)
+  per_session_result_queue: 32      # dispatcher xử lý nhanh, 32 là đủ
+  per_session_egress_queue: 300     # 300 × 20ms = 6s — IMS call có utterance dài hơn (dịch thuật)
+
+# ── Audio pipeline ────────────────────────────────────────────────────────────
+# AMR-WB: RTP payload 8kHz/20ms → decode → PCM 16kHz → gửi AI
+# AMR-NB: RTP payload 8kHz/20ms → decode → PCM 8kHz  → gửi AI (nếu AI hỗ trợ)
+pipeline:
+  audio_worker_count:   32      # unused — per-session goroutine model
+  audio_job_queue_size: 32      # per-session job queue (packet đang chờ pipeline goroutine)
+  jitter_buffer_ms:     80      # IMS network thường có jitter cao hơn LAN
+  max_packet_late_ms:   200     # AMR-WB 20ms frame — chấp nhận đến muộn tối đa 200ms
+  packet_time_ms:       20      # AMR-WB và G.711 đều dùng 20ms ptime
+  jitter_out_queue_size: 32     # tăng theo jitter_buffer_ms cao hơn
+
+# ── Audio output ──────────────────────────────────────────────────────────────
+audio:
+  output_sample_rate: 16000   # AI worker thường cần 16kHz
+  output_channels:    1       # mono
+  chunk_ms:           100     # gửi AI mỗi 100ms (5 frames G.711/AMR-WB 20ms)
+  # pcm_dump_dir: ""          # để trống trên production
+
+# ── AI gRPC ───────────────────────────────────────────────────────────────────
+ai:
+  grpc_target:         "ai-cluster.internal:50051"
+  max_active_streams:  5000         # = max_sessions
+  per_stream_queue_size: 32         # IMS call dài — buffer thêm khi gRPC slow
+  send_timeout_ms:     500
+  stream_timeout_sec:  600          # IMS call có thể kéo dài >5 phút
+  max_retry:            3
+  retry_backoff_ms:     1000
+  keepalive_time_sec:   30   # PING mỗi 30s — quan trọng cho IMS call dài có đoạn im lặng
+  keepalive_timeout_sec: 10
+
+# ── Result dispatcher ─────────────────────────────────────────────────────────
+result:
+  dispatcher_workers:    32
+  queue_size:            16384
+  drop_partial_when_full: true
+  send_timeout_ms:        2000
+
+# ── HTTP callback → MF HTTP/2 server ─────────────────────────────────────────
+# URL thực tế để gửi ASR transcript đến từ DCSF qua ctrl-result, per-termination:
+#   mediaResources.tCore.callbackUrl   → session {callId}-tcore
+#   mediaResources.tAccess.callbackUrl → session {callId}-taccess
+# MF HTTP/2 server phải hỗ trợ H2C (cleartext) hoặc TLS+H2.
+# url: pre-connect (warm-up H/2) khi khởi động — không phải URL gửi kết quả.
+#   Đặt trùng host với callbackUrl DCSF sẽ gửi để tận dụng H/2 connection pool.
+#   Tất cả session cùng callback host tái sử dụng chung 1 kết nối H/2 duy nhất.
+# Xem docs/callback.md để biết chi tiết format bản tin.
+callback:
+  url: "http://mf-callback.internal:8090"  # pre-connect warm-up (thay bằng host thực của MF)
+  timeout_ms:        2000   # IMS AS thường respond trong <1s; 2s an toàn
+  max_retry:         3
+  retry_backoff_ms:  500    # backoff dài hơn — tránh storm khi AS bận
+  read_idle_timeout_ms: 30000  # gửi H/2 PING sau 30s idle để giữ kết nối
+  ping_timeout_ms:  15000   # đóng connection nếu không nhận PONG trong 15s
+
+# ── DCSF outbound (CALL_CTRL) ─────────────────────────────────────────────────
+dcsf:
+  hosts:
+    - host: "dcsf.ims.internal"
+      port: 9090
+  call_control_timeout_ms: 30000
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log:
+  level: "info"
+  format: "json"   # structured log cho ELK / Loki
+  monitor_interval_sec: 60  # in thống kê định kỳ mỗi 60s; 0 = tắt
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-ai-gateway
+  namespace: media
+  labels:
+    app: media-ai-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: media-ai-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+# RTP traffic (cả shared :5004 lẫn per-session :40000-40999) đi qua macvlan interface
+# trực tiếp pod-to-pod, không cần expose qua Kubernetes Service.

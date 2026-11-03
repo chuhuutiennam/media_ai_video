@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package video;
+
+option go_package = "media-ai-gateway/internal/ai/proto";
+
+service VideoStream {
+  // Segment nhận stream VideoRequest từ gateway, trả stream VideoResponse.
+  rpc Segment(stream VideoRequest) returns (stream VideoResponse);
+}
+
+// VideoConfig cấu hình 1 lần lúc mở stream 
+message VideoConfig {
+  string effect_type       = 1; // "bg_blur" | "bg_replace" | "bg_remove"
+  uint32 inference_width   = 2; // kích thước JPEG đã resize gửi trong VideoFrame.image_data
+  uint32 inference_height  = 3;
+  uint32 inference_fps     = 4; // FPS mục tiêu sau khi Gateway đã FPS-sample
+  float  threshold         = 5; // ngưỡng confidence cho mask segmentation; 0 = dùng default AI worker
+}
+
+// VideoFrame là 1 frame đã decode + resize + JPEG-encode
+message VideoFrame {
+  int64  frame_id         = 1; // tăng dần theo session, dùng để khớp VideoMask trả về
+  int64  rtp_timestamp    = 2; // RTP timestamp 32-bit gốc (chỉ tham khảo — có thể wrap-around)
+  int32  original_width   = 3; // độ phân giải GỐC sau decode (trước resize) — dùng để scale mask ngược lại nếu cần
+  int32  original_height  = 4;
+  string encoding         = 5; // "jpeg" — hiện tại luôn là JPEG (xem ghi chú lựa chọn format trong rtpgw_design_v3.md phần đánh giá lại)
+  bytes  image_data       = 6; // JPEG bytes đã encode, kích thước theo VideoConfig.inference_width/height
+  int64  timestamp_ms     = 7;
+}
+
+// VideoRequest — mỗi message trên stream LUÔN chỉ mang 1 trong 2:
+// config (message đầu tiên) hoặc frame (mọi message sau đó).
+// Ngoại lệ: message chỉ có is_eos=true, session_id, stream_id dùng để đóng stream.
+message VideoRequest {
+  string session_id = 1;
+  bool   is_eos      = 2; // true = frame cuối, đóng stream sau khi AI worker xử lý xong
+  oneof payload {
+    VideoConfig config = 3;
+    VideoFrame  frame  = 4;
+  }
+  string stream_id = 5;
+}
+
+// VideoMask là kết quả segmentation cho một frame. Binary RLE theo row-major:
+// background=0, foreground=1; run đầu là background và có thể bằng 0.
+// Khi status="ok", tổng rle_counts = mask_width * mask_height (kích thước inference).
+message VideoMask {
+  int64           frame_id      = 1; // echo lại VideoFrame.frame_id tương ứng
+  int64           rtp_timestamp = 2;
+  int32           mask_width    = 3;
+  int32           mask_height   = 4;
+  repeated uint32 rle_counts    = 5;
+  float           latency_ms    = 6; // thời gian inference phía AI worker (ms); 0 nếu không đo
+  string          status        = 7; // "ok" | "error" | ...
+  string          error_message = 8; // chi tiết lỗi nếu status != "ok"
+}
+
+// VideoResponse — AI worker gửi 1 message cho mỗi VideoFrame nhận được
+message VideoResponse {
+  string    session_id = 1;
+  VideoMask mask        = 2;
+  bool      is_final    = 3; // true = mask cuối cùng AI worker sẽ gửi cho stream này (ít dùng — thường luôn true, 1 mask/frame)
+  string    stream_id   = 4;
+}
