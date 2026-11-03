@@ -19,6 +19,21 @@ apt-get install build-essential
 yum groupinstall "Development Tools"
 ```
 
+### Chuẩn bị dependencies (vendor/)
+
+Repo không commit thư mục `vendor/`. Sau khi clone (hoặc khi `go.mod`/`go.sum` thay đổi), chạy:
+
+```bash
+go mod download   # tải module (cần Internet hoặc GOPROXY)
+go mod vendor     # tạo vendor/ từ go.mod + go.sum
+```
+
+Bắt buộc trước khi:
+- Build Docker image — `deploy/Dockerfile` dùng `COPY vendor/` và `go build -mod=vendor`
+- Chạy `scripts/test-real-ai-g711.sh` (build với `-mod=vendor`)
+
+> Khi có `vendor/`, `go build` tự dùng vendor. Nếu báo `inconsistent vendoring` → chạy lại `go mod vendor`.
+
 ### System libraries
 
 | Thư viện | Ubuntu/Debian | RedHat/CentOS | Dùng cho |
@@ -103,6 +118,9 @@ Output: mỗi dòng là một JSON — `{"event":"ready"}`, `{"event":"callback"
 ## Deploy
 
 ```bash
+# Chuẩn bị vendor/ (bắt buộc, Dockerfile build -mod=vendor)
+go mod vendor
+
 # Build image
 docker build -f deploy/Dockerfile -t registry.local/media-ai-gateway:latest .
 docker push registry.local/media-ai-gateway:latest
