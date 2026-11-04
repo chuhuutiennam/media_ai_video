@@ -1,0 +1,70 @@
+# Standalone gesture worker; paths are relative to this file.
+gesture:
+  enabled: true
+  model: "../../checkpoint/gesture_recognizer.task"  # relative to this YAML
+  delegate: "cpu"
+  num_hands: 4                       # supports 1..8 hands, including several people
+  max_fps: 15
+  max_concurrent_recognizers: 4
+  result_timeout_secs: 2.0
+  min_hand_detection_confidence: 0.5
+  min_hand_presence_confidence: 0.5
+  min_tracking_confidence: 0.5
+  static_score_threshold: 0.6        # sample Thumb_Up scores are around 0.64..0.68
+  static_hold_ms: 200
+  static_gap_ms: 150                 # tolerate short uncertain classifier results
+  static_min_samples: 3
+  track_max_gap_ms: 500
+  static_release_ms: 300
+  cooldown_ms: 1500
+  max_result_age_ms: 500
+  emoji_mapping:
+    Thumb_Up: thumb_up
+    Thumb_Down: thumb_down
+    Victory: victory
+    ILoveYou: heart
+    Closed_Fist: fist
+    Pointing_Up: point_up
+    Wave: wave
+
+wave:
+  enabled: true
+  signal: palm                      # palm | wrist; compare with wave_replay first
+  counter: hysteresis               # hysteresis | steps (notebook-style)
+  open_palm_score_threshold: 0.5     # independent of static_score_threshold
+  require_open_palm: true           # false only for measured ablation experiments
+  min_step: 0.08                    # palm-size units; steps counter noise threshold
+  min_motion_fraction: 0.005        # absolute noise floor, fraction of image width
+  window_ms: 1000
+  min_duration_ms: 400
+  min_direction_changes: 2
+  max_observation_gap_ms: 300
+  cooldown_ms: 2000
+  min_amplitude: 0.65                # directional stroke / palm size
+  min_open_ratio: 0.7
+  smoothing_alpha: 0.65
+  max_track_distance: 3.0
+
+# Per-hand cartoon stickers for file-video tests.
+overlay:
+  enabled: true
+  duration_ms: 1500
+  position: "near_hand"
+  size_ratio: 0.16
+  hand_lost_ms: 300
+  assets_dir: null                  # null = packaged PNG icons; otherwise relative to YAML
+
+server:
+  addr: "127.0.0.1:50053"
+  max_streams: 8
+  max_receive_message_bytes: 8388608
+  max_inference_dim: 1920
+  shutdown_grace_secs: 2.0
+metrics:
+  enabled: true
+  port: 9102
+  log_interval_secs: 60             # 0 disables periodic metric snapshots
+logging:
+  level: INFO
+  file: "logs/mediapipe-gesture.log" # relative to process working directory
+  backup_days: 30                   # rotate daily at UTC midnight

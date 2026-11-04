@@ -3,12 +3,29 @@ package controlplane
 import (
 	"fmt"
 	"io"
+
+	"media-ai-gateway/internal/jitter"
 )
 
 func (s *Server) videoMetricsWrite(w io.Writer) {
 	write := func(name, kind, help string, value uint64) {
 		fmt.Fprintf(w, "# HELP media_ai_video_%s %s\n# TYPE media_ai_video_%s %s\nmedia_ai_video_%s %d\n",
 			name, help, name, kind, name, value)
+	}
+	write("ingress_packets_total", "counter", "Video UDP datagrams read", s.videoIngress.Received.Load())
+	write("ingress_parsed_total", "counter", "Valid video RTP datagrams parsed", s.videoIngress.Parsed.Load())
+	write("ingress_parse_errors_total", "counter", "Invalid video RTP datagrams", s.videoIngress.ParseErrors.Load())
+	write("ingress_queue_dropped_total", "counter", "Video RTP session queue drops", s.videoIngress.QueueDropped.Load())
+	if source, ok := s.coord.(interface{ VideoJitterStats() jitter.Stats }); ok {
+		st := source.VideoJitterStats()
+		write("jitter_input_total", "counter", "Video packets passed to jitter", st.Pushed)
+		write("jitter_received_total", "counter", "Video packets admitted to jitter", st.Received)
+		write("jitter_released_total", "counter", "Video packets released by jitter", st.Released)
+		write("jitter_dropped_total", "counter", "Video jitter packet drops", st.Dropped)
+		write("jitter_lost_total", "counter", "Video missing sequence numbers declared lost", st.Lost)
+		write("jitter_late_dropped_total", "counter", "Video packets rejected as too old on Push", st.LateDropped)
+		write("jitter_duplicate_dropped_total", "counter", "Video old or duplicate packet drops", st.DuplicateDropped)
+		write("jitter_output_dropped_total", "counter", "Video packets dropped at full jitter output", st.OutputDropped)
 	}
 	if s.videoPool != nil {
 		st := s.videoPool.Stats()
@@ -17,7 +34,7 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("pool_submitted_total", "counter", "Video RTP jobs submitted", st.Submitted)
 		write("pool_processed_total", "counter", "Video RTP jobs processed", st.Processed)
 		write("pool_dropped_total", "counter", "Video RTP jobs dropped", st.Dropped)
-		write("frames_total", "counter", "JPEG frames enqueued for video AI", st.Frames)
+		write("frames_total", "counter", "Task frames enqueued for video AI (JPEG)", st.Frames)
 		write("frames_dropped_total", "counter", "Video frames dropped from AI input queue", st.FramesDropped)
 		write("decode_errors_total", "counter", "Video decode or JPEG conversion errors", st.DecodeErrors)
 	}
@@ -26,6 +43,9 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("ai_streams_active", "gauge", "Active video AI streams", uint64(s.videoAI.Count()))
 		write("ai_frames_sent_total", "counter", "Video frames sent to AI", st.FramesSent)
 		write("ai_results_received_total", "counter", "Video results received from AI", st.ResultsReceived)
+		write("gesture_results_received_total", "counter", "Gesture snapshots received from AI", st.GestureResults)
+		write("gesture_results_dropped_total", "counter", "Gesture snapshots dropped before shared result queue", st.GestureDropped)
+		write("mask_results_dropped_total", "counter", "Mask snapshots dropped before shared result queue", st.MaskDropped)
 		write("ai_send_errors_total", "counter", "Video AI send errors", st.SendErrors)
 		write("ai_recv_errors_total", "counter", "Video AI receive errors", st.RecvErrors)
 		write("ai_result_errors_total", "counter", "Video AI results with missing or unsuccessful masks", st.ResultErrors)

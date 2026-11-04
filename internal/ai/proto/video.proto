@@ -5,8 +5,62 @@ package video;
 option go_package = "media-ai-gateway/internal/ai/proto";
 
 service VideoStream {
-  // Segment nhận stream VideoRequest từ gateway, trả stream VideoResponse.
-  rpc Segment(stream VideoRequest) returns (stream VideoResponse);
+  // Shared JPEG transport. Each stream owns one task selected by config.ai_service.
+  // Empty ai_service selects segmentation for compatibility with older clients.
+  // rpc Segment(stream VideoRequest) returns (stream VideoResponse);
+}
+
+// One source stream per video leg. The engine fans frames out to independent tasks.
+// Segment remains available for existing workers and direct-worker deployments.
+service VideoAIService {
+  rpc Process(stream SourceRequest) returns (stream SourceResponse);
+}
+
+message SourceOpen {
+  string session_id = 1;
+  string stream_id = 2;
+  string media_epoch = 3;
+  string selected_service = 4;
+  uint32 input_fps = 5;
+  uint32 input_max_dimension = 6;
+  VideoConfig segmentation = 7; // presence enables the task
+  VideoConfig gesture = 8; // presence enables the task
+}
+
+message SourceRequest {
+  oneof payload {
+    SourceOpen open = 1; // first message only
+    VideoFrame frame = 2;
+    bool close = 3; // equivalent to a client half-close; drain accepted work
+  }
+}
+
+message SourceOpened {
+  repeated string tasks = 1;
+  uint32 max_inflight = 2; // ingress credits, released by FrameAccepted
+}
+
+message FrameAccepted {
+  int64 frame_id = 1; // admitted to task queues, NOT inference completion
+}
+
+message VideoTaskStatus {
+  string ai_service = 1;
+  string status = 2; // "failed"; other tasks may continue
+  string error_message = 3;
+}
+
+message SourceResponse {
+  string session_id = 1;
+  string stream_id = 2;
+  string media_epoch = 3;
+  string engine_epoch = 4;
+  oneof payload {
+    SourceOpened opened = 5;
+    FrameAccepted accepted = 6;
+    VideoResponse result = 7; // zero or more independent task results per input
+    VideoTaskStatus task_status = 8;
+  }
 }
 
 // VideoConfig cấu hình 1 lần lúc mở stream 
@@ -16,6 +70,11 @@ message VideoConfig {
   uint32 inference_height  = 3;
   uint32 inference_fps     = 4; // FPS mục tiêu sau khi Gateway đã FPS-sample
   float  threshold         = 5; // ngưỡng confidence cho mask segmentation; 0 = dùng default AI worker
+  string selected_service  = 6; // business service, e.g. change_background
+  string ai_service        = 7; // "segmentation" | "gesture_recognition"; empty = segmentation
+  string media_epoch       = 8;
+  uint32 max_hands         = 9;
+  string input_format      = 10; // "jpeg"; empty accepted by legacy segmentation
 }
 
 // VideoFrame là 1 frame đã decode + resize + JPEG-encode
@@ -25,8 +84,11 @@ message VideoFrame {
   int32  original_width   = 3; // độ phân giải GỐC sau decode (trước resize) — dùng để scale mask ngược lại nếu cần
   int32  original_height  = 4;
   string encoding         = 5; // "jpeg" — hiện tại luôn là JPEG (xem ghi chú lựa chọn format trong rtpgw_design_v3.md phần đánh giá lại)
-  bytes  image_data       = 6; // JPEG bytes đã encode, kích thước theo VideoConfig.inference_width/height
+  bytes  image_data       = 6; // JPEG bytes đã encode, kích thước theo width/height hoặc VideoConfig.inference_width/height
   int64  timestamp_ms     = 7;
+  uint64 extended_rtp_timestamp = 8;
+  uint32 width           = 9; // actual JPEG dimensions; preserve source aspect ratio for gesture
+  uint32 height          = 10;
 }
 
 // VideoRequest — mỗi message trên stream LUÔN chỉ mang 1 trong 2:
@@ -59,7 +121,45 @@ message VideoMask {
 // VideoResponse — AI worker gửi 1 message cho mỗi VideoFrame nhận được
 message VideoResponse {
   string    session_id = 1;
-  VideoMask mask        = 2;
+  oneof result {
+    VideoMask mask = 2;
+    GestureResult gesture = 5;
+  }
   bool      is_final    = 3; // true = mask cuối cùng AI worker sẽ gửi cho stream này (ít dùng — thường luôn true, 1 mask/frame)
   string    stream_id   = 4;
+  string    ai_service  = 6;
+  uint64    seq         = 7;
+}
+
+message Reaction {
+  string event_id = 1;
+  string gesture = 2;
+  string emoji_key = 3;
+  int64 started_at_ms = 4;
+  int64 valid_until_ms = 5;
+}
+
+message Hand {
+  uint64 track_id = 1;
+  string handedness = 2;
+  string raw_label = 3;
+  double raw_score = 4;
+  string stable_label = 5;
+  repeated double center = 6; // normalized source coordinates [x, y]
+  repeated double bbox = 7; // normalized source coordinates [xmin, ymin, xmax, ymax]
+  Reaction active_reaction = 8;
+}
+
+message GestureResult {
+  string media_epoch = 1;
+  string recognizer_epoch = 2;
+  string response_id = 3;
+  int64 frame_id = 4;
+  uint32 rtp_timestamp = 5;
+  uint64 extended_rtp_timestamp = 6;
+  int64 timestamp_ms = 7;
+  uint32 original_width = 8;
+  uint32 original_height = 9;
+  string status = 10;
+  repeated Hand hands = 11;
 }

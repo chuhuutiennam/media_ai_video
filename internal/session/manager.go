@@ -162,6 +162,8 @@ func (m *Manager) Create(cfg SessionConfig) (*Session, error) {
 		status:           StatusCreated,
 	}
 	if cfg.VideoEnabled {
+		s.VideoMaskResultQueue = make(chan pipeline.RecognitionResult, m.cfg.ResultQueueSize)
+		s.GestureResultQueue = make(chan pipeline.RecognitionResult, m.cfg.ResultQueueSize)
 		s.VideoPacketQueue = make(chan pipeline.MediaPacket, m.cfg.VideoPacketQueueSize)
 		s.VideoFrameQueue = make(chan pipeline.VideoFrame, m.cfg.VideoFrameQueueSize)
 	}

@@ -14,12 +14,9 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"flag"
 	"fmt"
-	"image/color"
-	"image/jpeg"
 	"io"
 	"math"
 	"net"
@@ -30,16 +27,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	videopb "media-ai-gateway/internal/ai/proto"
+	"media-ai-gateway/workers/mockai"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/encoding"
 	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 // ── Protobuf codec ────────────────────────────────────────────────────────────
@@ -52,8 +48,8 @@ func (protoCodec) Marshal(v any) ([]byte, error) {
 	switch m := v.(type) {
 	case *recognitionResultWire:
 		return marshalRecognitionResult(m), nil
-	case *videopb.Response:
-		return (videopb.Codec{}).Marshal(m)
+	case proto.Message:
+		return proto.Marshal(m)
 	default:
 		return nil, fmt.Errorf("protoCodec: unsupported marshal type %T", v)
 	}
@@ -63,8 +59,8 @@ func (protoCodec) Unmarshal(data []byte, v any) error {
 	switch m := v.(type) {
 	case *audioChunkWire:
 		return unmarshalAudioChunk(data, m)
-	case *videopb.Request:
-		return (videopb.Codec{}).Unmarshal(data, m)
+	case proto.Message:
+		return proto.Unmarshal(data, m)
 	default:
 		return fmt.Errorf("protoCodec: unsupported unmarshal type %T", v)
 	}
@@ -75,16 +71,16 @@ func init() { encoding.RegisterCodec(protoCodec{}) }
 // ── Wire types ────────────────────────────────────────────────────────────────
 
 type audioChunkWire struct {
-	SessionID   string
-	StreamID    string
-	PCM         []byte
-	SampleRate  int
-	Channels    int
+	SessionID    string
+	StreamID     string
+	PCM          []byte
+	SampleRate   int
+	Channels     int
 	RTPTimestamp uint32
-	DurationMs  int64
-	EndOfStream bool
-	Language    string
-	Task        string
+	DurationMs   int64
+	EndOfStream  bool
+	Language     string
+	Task         string
 }
 
 type recognitionResultWire struct {
@@ -392,7 +388,7 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 	// Chọn audio source cho session này.
 	// Ưu tiên pcmuFiles (--pcm-dir); fallback về pcmuSilence (--audio-packets).
 	var sessionAudio []byte // toàn bộ PCMU của session
-	var audioOffset  int    // byte đã gửi trong sessionAudio
+	var audioOffset int     // byte đã gửi trong sessionAudio
 	if len(pcmuFiles) > 0 {
 		idx := int(sessionCounter.Add(1)-1) % len(pcmuFiles)
 		sessionAudio = pcmuFiles[idx]
@@ -504,121 +500,6 @@ func recognizeHandler(_ any, stream grpc.ServerStream) error {
 	return nil
 }
 
-// ── Video gRPC handler ────────────────────────────────────────────────────────
-
-// Video mock performs deterministic segmentation from JPEG pixel luminance.
-// It thresholds JPEG luminance; use the MediaPipe worker for model inference.
-
-// registerVideo registers /video.VideoStream/Segment. The server codec must
-// accept videopb.Request and videopb.Response (videopb.Codec does).
-func registerVideo(server *grpc.Server) {
-	server.RegisterService(&grpc.ServiceDesc{
-		ServiceName: "video.VideoStream",
-		HandlerType: (*any)(nil),
-		Streams: []grpc.StreamDesc{{
-			StreamName: "Segment", Handler: segment,
-			ClientStreams: true, ServerStreams: true,
-		}},
-	}, struct{}{})
-}
-
-func segment(_ any, stream grpc.ServerStream) error {
-	var config videopb.Request
-	if err := stream.RecvMsg(&config); err != nil {
-		return err
-	}
-	if !config.HasConfig || config.SessionID == "" || config.IsEOS {
-		return status.Error(codes.InvalidArgument, "first message must contain config and session_id")
-	}
-	if config.EffectType != "bg_blur" && config.EffectType != "bg_replace" && config.EffectType != "bg_remove" {
-		return status.Error(codes.InvalidArgument, "unsupported effect_type")
-	}
-	threshold := config.Threshold
-	if threshold == 0 {
-		threshold = 0.5
-	}
-	if math.IsNaN(float64(threshold)) || threshold < 0 || threshold > 1 {
-		return status.Error(codes.InvalidArgument, "threshold must be in [0,1]")
-	}
-	for {
-		var req videopb.Request
-		if err := stream.RecvMsg(&req); err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-		if req.SessionID != config.SessionID || req.StreamID != config.StreamID {
-			return status.Error(codes.InvalidArgument, "session_id/stream_id changed within stream")
-		}
-		if req.IsEOS && !req.HasConfig && !req.HasFrame {
-			return nil
-		}
-		if !req.HasFrame || req.HasConfig {
-			return status.Error(codes.InvalidArgument, "expected frame after config")
-		}
-		started := time.Now()
-		resp := &videopb.Response{
-			SessionID: req.SessionID, StreamID: req.StreamID,
-			HasMask: true, IsFinal: true, FrameID: req.FrameID,
-			RTPTimestamp: req.RTPTimestamp, Status: "ok",
-		}
-		if err := infer(&req, &config, threshold, resp); err != nil {
-			resp.Status, resp.ErrorMessage = "error", err.Error()
-		}
-		resp.LatencyMs = float32(time.Since(started).Seconds() * 1000)
-		if err := stream.SendMsg(resp); err != nil {
-			return err
-		}
-		zap.L().Debug("video: luminance segmentation", zap.String("session_id", req.SessionID),
-			zap.Int64("frame_id", req.FrameID), zap.Int("jpeg_bytes", len(req.ImageData)),
-			zap.Int("rle_segments", len(resp.RLECounts)), zap.String("status", resp.Status))
-		if req.IsEOS {
-			return nil
-		}
-	}
-}
-
-func infer(req, config *videopb.Request, threshold float32, resp *videopb.Response) error {
-	if req.Encoding != "jpeg" {
-		return status.Error(codes.InvalidArgument, "encoding must be jpeg")
-	}
-	reader := bytes.NewReader(req.ImageData)
-	size, err := jpeg.DecodeConfig(reader)
-	if err != nil {
-		return err
-	}
-	if size.Width <= 0 || size.Height <= 0 || size.Width > 4096 || size.Height > 4096 {
-		return status.Error(codes.InvalidArgument, "JPEG dimensions exceed lab limit")
-	}
-	if uint32(size.Width) != config.InferWidth || uint32(size.Height) != config.InferHeight {
-		return status.Error(codes.InvalidArgument, "JPEG dimensions do not match config")
-	}
-	reader.Reset(req.ImageData)
-	img, err := jpeg.Decode(reader)
-	if err != nil {
-		return err
-	}
-	resp.MaskWidth, resp.MaskHeight = int32(size.Width), int32(size.Height)
-	// Binary RLE, row-major, starting with a background (0) run. A foreground
-	// first pixel therefore produces an initial zero count. Sum = width*height.
-	foreground := false
-	var run uint32
-	for y := 0; y < size.Height; y++ {
-		for x := 0; x < size.Width; x++ {
-			v := color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y
-			pixel := float32(v)/255 > threshold
-			if pixel != foreground {
-				resp.RLECounts = append(resp.RLECounts, run)
-				run, foreground = 0, pixel
-			}
-			run++
-		}
-	}
-	resp.RLECounts = append(resp.RLECounts, run)
-	return nil
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
@@ -654,6 +535,7 @@ func main() {
 	}
 
 	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(32<<20),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             20 * time.Second, // gateway mặc định ping mỗi 30s — cho phép xuống 20s
 			PermitWithoutStream: true,             // cho phép ping khi không có stream active
@@ -672,7 +554,7 @@ func main() {
 			},
 		},
 	}, struct{}{})
-	registerVideo(srv)
+	mockai.RegisterVideo(srv)
 
 	if *pcmDir != "" {
 		var err error

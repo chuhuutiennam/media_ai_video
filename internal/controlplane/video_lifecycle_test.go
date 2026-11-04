@@ -110,3 +110,25 @@ func TestVideoAnswerDisabledAndMissingPorts(t *testing.T) {
 		}
 	}
 }
+
+func TestGestureOnlyAnswerAllocatesVideoWithoutBackground(t *testing.T) {
+	starter := &fakeStarter{}
+	start, end := availableUDPRange(t, 4)
+	s := newTestServerWithVideo(t, starter, start, end)
+	w := postJSON(t, s, notifyPath(testCallID), SessionEvent{Event: "ANSWER", SelectedService: "gesture_recognition"})
+	assertStatus(t, w, http.StatusCreated)
+	var response SessionResponse
+	decodeJSON(t, w, &response)
+	if response.TCoreVideoRTPPort == 0 || response.TAccessVideoRTPPort == 0 || response.TCoreRTPPort != 0 || response.TAccessRTPPort != 0 {
+		t.Fatal("gesture-only allocated the wrong media ports")
+	}
+	if len(starter.sessions) != 2 {
+		t.Fatal("gesture-only did not start both video legs")
+	}
+	for _, sess := range starter.sessions {
+		defer s.sessionMgr.Close(sess.ID)
+		if sess.Task != "gesture_recognition" || sess.Codec != "" || sess.EffectType != "" || !sess.VideoEnabled {
+			t.Fatalf("gesture-only session requested audio/background: %+v", sess)
+		}
+	}
+}

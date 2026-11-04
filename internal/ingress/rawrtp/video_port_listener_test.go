@@ -50,7 +50,8 @@ func TestVideoPortListener_ReceivesPacket(t *testing.T) {
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
 
-	if err := StartVideoSessionListener(sess, "127.0.0.1", port, releaser); err != nil {
+	stats := &VideoIngressCounters{}
+	if err := StartVideoSessionListener(sess, "127.0.0.1", port, releaser, stats); err != nil {
 		t.Fatalf("StartVideoSessionListener: %v", err)
 	}
 
@@ -99,6 +100,10 @@ func TestVideoPortListener_ReceivesPacket(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout: không nhận được packet trong sess.VideoPacketQueue")
+	}
+
+	if stats.Received.Load() != 1 || stats.Parsed.Load() != 1 || stats.ParseErrors.Load() != 0 || stats.QueueDropped.Load() != 0 {
+		t.Fatalf("wrong ingress accounting: received=%d parsed=%d parseErrors=%d queueDrops=%d", stats.Received.Load(), stats.Parsed.Load(), stats.ParseErrors.Load(), stats.QueueDropped.Load())
 	}
 
 	// Đảm bảo KHÔNG lọt nhầm vào sess.PacketQueue (audio) — SSRC/port hoàn
@@ -214,7 +219,8 @@ func TestVideoPortListener_ExtensionsPaddingAndMalformed(t *testing.T) {
 	}
 	port := ln.LocalAddr().(*net.UDPAddr).Port
 	ln.Close()
-	if err := StartVideoSessionListener(sess, "127.0.0.1", port, &fakeReleaser{}); err != nil {
+	stats := &VideoIngressCounters{}
+	if err := StartVideoSessionListener(sess, "127.0.0.1", port, &fakeReleaser{}, stats); err != nil {
 		t.Fatal(err)
 	}
 	conn, err := net.Dial("udp", "127.0.0.1:"+itoa(port))
@@ -248,6 +254,10 @@ func TestVideoPortListener_ExtensionsPaddingAndMalformed(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("valid RTP after malformed packets was not received")
 	}
+	if stats.Received.Load() != 5 || stats.Parsed.Load() != 1 || stats.ParseErrors.Load() != 4 {
+		t.Fatalf("malformed datagrams hidden: received=%d parsed=%d errors=%d", stats.Received.Load(), stats.Parsed.Load(), stats.ParseErrors.Load())
+	}
+
 	select {
 	case got := <-sess.VideoPacketQueue:
 		t.Fatalf("malformed RTP was accepted: %+v", got)

@@ -95,7 +95,7 @@ Theo dõi luồng kết quả nhận dạng (ASR) từ AI worker tới callback 
 
 | Metric | Type | Ý nghĩa |
 |--------|------|---------|
-| `media_ai_dispatcher_queue_len` | Gauge | Số `RecognitionResult` đang chờ trong queue của dispatcher. |
+| `media_ai_dispatcher_queue_len` | Gauge | Tổng `RecognitionResult` đang chờ trong ba queue độc lập của dispatcher (default, video_segment, gesture_recognition). |
 | `media_ai_dispatcher_pushed_total` | Counter | Tổng kết quả được push vào dispatcher queue (bao gồm cả những cái bị drop sau đó). |
 | `media_ai_dispatcher_sent_total` | Counter | Tổng kết quả đã được deliver thành công tới sink (callback + DataChannel cộng lại). |
 | `media_ai_dispatcher_send_errors_total` | Counter | Tổng lỗi khi sink (HTTP callback, DataChannel) không nhận được sau tất cả retry. |
@@ -260,3 +260,29 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
 | `per_session_open` | Số port UDP đang cấp phát = số session đang dùng per-session RTP port |
 | `per_session_capacity` | Tổng số port trong pool (`rtp_port_end - rtp_port_start + 1`); `0` nếu pool không cấu hình |
 | `shared_ingress` | `true` nếu shared UDP ingress (`:5004`) đang chạy |
+
+## Video ingress và jitter riêng
+
+Các counter `media_ai_jitter_*` cũ không bao phủ video jitter. Gateway bổ sung:
+
+| Metric suffix sau `media_ai_video_` | Ý nghĩa |
+| --- | --- |
+| ingress_packets_total | Datagram UDP đã đọc thành công |
+| ingress_parsed_total | RTP hợp lệ sau parse |
+| ingress_parse_errors_total | Datagram bị loại khi parse |
+| ingress_queue_dropped_total | Queue packet của session đầy |
+| jitter_input_total | Số lần Push vào jitter, kể cả bị từ chối |
+| jitter_received_total | Được nhận vào heap jitter |
+| jitter_released_total | Được đưa ra output của jitter |
+| jitter_late_dropped_total | Bị từ chối vì tuổi packet vượt max_packet_late_ms |
+| jitter_duplicate_dropped_total | Duplicate hoặc sequence đã được xử lý |
+| jitter_output_dropped_total | Output channel của jitter đầy |
+| jitter_dropped_total | Tổng các lý do drop trên |
+| jitter_lost_total | Gap sequence được declare lost, có thể trùng với packet đã drop late |
+
+Counter này được giữ trong vòng đời server/coordinator, không giữ reference tới
+session đã đóng. Không cộng lost và dropped như hai tập packet độc lập. Đối chiếu
+sender → ingress → jitter → video pool để phân biệt UDP loss, parse/queue drop và
+jitter drop. Các thay đổi counter không đổi jitter window hay chính sách nhận RTP.
+
+`media_ai_dispatcher_task_queue_len{task="default|video_segment|gesture_recognition"}` là gauge theo từng nhánh (ba giá trị label cố định). Mỗi nhánh có `result.queue_size` chỗ và `result.dispatcher_workers` worker riêng. Metric counter Dispatcher hiện tại vẫn cộng gộp các nhánh.

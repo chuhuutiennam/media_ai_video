@@ -30,11 +30,15 @@ mock-callback-server :9999   ← H2C server, log JSON mỗi callback
 
 ---
 
+Video/gesture/PCAP dùng [hướng dẫn video hiện tại](../docs/video-testing.md);
+phần còn lại của tài liệu này tập trung lab audio.
+
 ## Test scripts có sẵn
 
 | Script | Mô tả | Yêu cầu |
 |---|---|---|
 | `test-callback-e2e.sh` | Tự build + chạy + verify toàn bộ pipeline với **mock AI** | Go, curl, python3 |
+| `test-video-external-e2e.sh` | Video/PCAP với hai worker external; `--gesture-only` để kiểm tra riêng gesture | Go/CGO, FFmpeg, CMake, C++ MF, curl HTTP/2; xem [hướng dẫn](../docs/video-testing.md) |
 | `test-realai-e2e.sh` | E2E với **AI thật**, đọc file G.711 60s thực, binaries đã build sẵn | Binaries + AI gRPC |
 
 ---

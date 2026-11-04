@@ -8,6 +8,8 @@
 # Build output
 /dist/
 /bin/
+build/
+run/
 
 # Test artifacts
 *.test
@@ -33,3 +35,17 @@ Thumbs.db
 # Local backups / machine-specific settings
 /media_ai_video.zip
 .claude/settings.local.json
+
+# lib
+ff_7.1.1/
+
+# Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Worker runtime logs and PID files
+/workers/*/logs/

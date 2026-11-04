@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediapipe-gesture"
+version = "0.1.0"
+description = "Video-based multi-hand MediaPipe gesture recognition and cartoon overlays"
+requires-python = ">=3.11"
+dependencies = [
+    "mediapipe==0.10.35",
+    "grpcio==1.81.1",
+    "grpcio-tools==1.81.1",
+    "protobuf==6.33.6",
+    "numpy==2.4.6",
+    "opencv-contrib-python>=4.5",
+    "PyYAML>=6.0",
+    "prometheus-client>=0.20",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[project.scripts]
+mediapipe-gesture = "mediapipe_gesture.demo:main"
+mediapipe-gesture-demo = "mediapipe_gesture.demo:main"
+mediapipe-gesture-server = "mediapipe_gesture.server:main"
+
+[tool.setuptools]
+packages = ["mediapipe_gesture"]
+package-dir = {mediapipe_gesture = "src"}
+
+[tool.setuptools.package-data]
+mediapipe_gesture = ["assets/emoji/*.png", "assets/emoji/README.md", "video.proto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["../.."]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mediapipe_gesture", "workers.gesture.src"]

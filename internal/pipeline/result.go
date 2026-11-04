@@ -51,9 +51,16 @@ type RecognitionResult struct {
 	AudioPayload []byte `json:"audio_payload,omitempty"`
 	// AudioPT là RTP payload type của AudioPayload (e.g. 0 cho PCMU).
 	AudioPT uint8 `json:"audio_pt,omitempty"`
+
+	GestureResult *GestureFrameResult `json:"gesture_result,omitempty"`
+	AIService     string              `json:"ai_service,omitempty"`
 }
 
 // IsVideoMask trả về true nếu result mang theo video mask (thay vì transcript).
 func (r RecognitionResult) IsVideoMask() bool {
 	return r.Kind == "video_mask" || r.VideoMask != nil
+}
+
+func (r RecognitionResult) IsVideoGesture() bool {
+	return r.Kind == "video_gesture" || r.GestureResult != nil
 }

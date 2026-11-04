@@ -36,17 +36,55 @@ func DefaultConfig() Config {
 
 // Stats là snapshot metrics của buffer tại một thời điểm.
 type Stats struct {
-	Received uint64
-	Released uint64
-	Dropped  uint64 // đến quá trễ, duplicate, hoặc output channel đầy
-	Lost     uint64 // gap được phát hiện (packet không bao giờ đến)
-	Jitter   uint32 // inter-arrival jitter theo RFC 3550 §6.4.1 (RTP timestamp units)
+	Pushed           uint64
+	LateDropped      uint64
+	DuplicateDropped uint64
+	OutputDropped    uint64
+	Received         uint64
+	Released         uint64
+	Dropped          uint64 // đến quá trễ, duplicate, hoặc output channel đầy
+	Lost             uint64 // gap được phát hiện (packet không bao giờ đến)
+	Jitter           uint32 // inter-arrival jitter theo RFC 3550 §6.4.1 (RTP timestamp units)
+}
+
+// Counters accumulates across short-lived video buffers without retaining sessions.
+// It deliberately does not change jitter admission, timing or drop policy.
+type Counters struct {
+	received, released, dropped, lost, pushed atomic.Uint64
+	late, duplicate, output                   atomic.Uint64
+}
+
+func (c *Counters) Stats() Stats {
+	return Stats{Received: c.received.Load(), Released: c.released.Load(), Dropped: c.dropped.Load(), Lost: c.lost.Load(),
+		Pushed: c.pushed.Load(), LateDropped: c.late.Load(), DuplicateDropped: c.duplicate.Load(), OutputDropped: c.output.Load()}
+}
+
+type dropReason uint8
+
+const (
+	dropLate dropReason = iota
+	dropDuplicate
+	dropOutput
+)
+
+func (c *Counters) drop(reason dropReason) {
+	c.dropped.Add(1)
+	switch reason {
+	case dropLate:
+		c.late.Add(1)
+	case dropDuplicate:
+		c.duplicate.Add(1)
+	case dropOutput:
+		c.output.Add(1)
+	}
 }
 
 // Buffer là jitter buffer cho một RTP session.
 // Goroutine-safe: Push() gọi được từ nhiều goroutine; Run() chạy một goroutine flush riêng.
 type Buffer struct {
-	cfg Config
+	aggregate                                            *Counters
+	pushed, lateDropped, duplicateDropped, outputDropped atomic.Uint64
+	cfg                                                  Config
 
 	mu           sync.Mutex
 	h            packetHeap
@@ -62,16 +100,16 @@ type Buffer struct {
 
 	// RFC 3550 §6.4.1 inter-arrival jitter state (under mu).
 	jSampleRate  int
-	jLastArrival int64   // previous arrival time in RTP timestamp units
-	jLastSend    uint32  // previous RTP Timestamp field
+	jLastArrival int64  // previous arrival time in RTP timestamp units
+	jLastSend    uint32 // previous RTP Timestamp field
 	jHasLast     bool
 	jVal         float64 // running jitter estimate
 
-	received    atomic.Uint64
-	released    atomic.Uint64
-	dropped     atomic.Uint64
-	lost        atomic.Uint64
-	jitterBits  atomic.Uint64 // math.Float64bits(jVal), written under mu, read lock-free
+	received   atomic.Uint64
+	released   atomic.Uint64
+	dropped    atomic.Uint64
+	lost       atomic.Uint64
+	jitterBits atomic.Uint64 // math.Float64bits(jVal), written under mu, read lock-free
 }
 
 // New tạo jitter buffer mới.
@@ -79,9 +117,34 @@ func New(cfg Config) *Buffer {
 	return &Buffer{cfg: cfg}
 }
 
+// NewWithCounters also records gateway-lifetime video counters.
+func NewWithCounters(cfg Config, counters *Counters) *Buffer {
+	b := New(cfg)
+	b.aggregate = counters
+	return b
+}
+func (b *Buffer) drop(reason dropReason) {
+	b.dropped.Add(1)
+	switch reason {
+	case dropLate:
+		b.lateDropped.Add(1)
+	case dropDuplicate:
+		b.duplicateDropped.Add(1)
+	case dropOutput:
+		b.outputDropped.Add(1)
+	}
+	if b.aggregate != nil {
+		b.aggregate.drop(reason)
+	}
+}
+
 // Push nhận một MediaPacket vào buffer.
 // Trả về false nếu packet bị drop.
 func (b *Buffer) Push(pkt pipeline.MediaPacket) bool {
+	b.pushed.Add(1)
+	if b.aggregate != nil {
+		b.aggregate.pushed.Add(1)
+	}
 	now := time.Now()
 
 	b.mu.Lock()
@@ -90,18 +153,21 @@ func (b *Buffer) Push(pkt pipeline.MediaPacket) bool {
 	// Luôn kiểm tra tuổi wall-clock — không phụ thuộc trạng thái initialized.
 	age := now.Sub(time.UnixMilli(pkt.ReceivedAtMs))
 	if age > time.Duration(b.cfg.MaxLateMs)*time.Millisecond {
-		b.dropped.Add(1)
+		b.drop(dropLate)
 		return false
 	}
 
 	// Drop duplicate của seq đã được release hoặc declare lost.
 	if b.hasProcessed && SeqDiff(pkt.Sequence, b.lastProcessed) <= 0 {
-		b.dropped.Add(1)
+		b.drop(dropDuplicate)
 		return false
 	}
 
 	heap.Push(&b.h, entry{pkt: pkt, arrivedAt: now})
 	b.received.Add(1)
+	if b.aggregate != nil {
+		b.aggregate.received.Add(1)
+	}
 
 	if !b.started {
 		b.firstAt = now
@@ -132,6 +198,7 @@ func (b *Buffer) Run(ctx context.Context, out chan<- pipeline.MediaPacket) {
 // Stats trả về snapshot metrics hiện tại (thread-safe).
 func (b *Buffer) Stats() Stats {
 	return Stats{
+		Pushed: b.pushed.Load(), LateDropped: b.lateDropped.Load(), DuplicateDropped: b.duplicateDropped.Load(), OutputDropped: b.outputDropped.Load(),
 		Received: b.received.Load(),
 		Released: b.released.Load(),
 		Dropped:  b.dropped.Load(),
@@ -200,9 +267,12 @@ func (b *Buffer) flush(now time.Time, out chan<- pipeline.MediaPacket) {
 			select {
 			case out <- top.pkt:
 				b.released.Add(1)
+				if b.aggregate != nil {
+					b.aggregate.released.Add(1)
+				}
 			default:
 				// Output channel đầy — drop để không block flush loop.
-				b.dropped.Add(1)
+				b.drop(dropOutput)
 			}
 			b.lastProcessed = b.nextExpected
 			b.hasProcessed = true
@@ -212,7 +282,7 @@ func (b *Buffer) flush(now time.Time, out chan<- pipeline.MediaPacket) {
 		} else if diff < 0 {
 			// Packet cũ hơn nextExpected (duplicate muộn) — discard.
 			heap.Pop(&b.h)
-			b.dropped.Add(1)
+			b.drop(dropDuplicate)
 
 		} else {
 			// diff > 0: heap có packet ở phía trước, đang thiếu nextExpected.
@@ -221,6 +291,9 @@ func (b *Buffer) flush(now time.Time, out chan<- pipeline.MediaPacket) {
 				b.lastProcessed = b.nextExpected
 				b.hasProcessed = true
 				b.lost.Add(1)
+				if b.aggregate != nil {
+					b.aggregate.lost.Add(1)
+				}
 				b.nextExpected++
 				b.holdUntil = now.Add(bufDur)
 				// Tiếp tục vòng lặp để thử release seq mới.

@@ -2,6 +2,7 @@ package ai
 
 import (
 	"errors"
+	"slices"
 	"sync"
 	"time"
 )
@@ -15,6 +16,38 @@ type WorkerRegistry struct {
 	mu      sync.RWMutex
 	workers map[string]WorkerInfo
 	ttl     time.Duration // 0 = không expire
+}
+
+// SelectVideoTask requires explicit capabilities and atomically reserves a slot.
+// Empty/wildcard audio registrations must never be selected for a video RPC.
+func (r *WorkerRegistry) SelectVideoTask(task, format, protocol string) (WorkerInfo, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var best *WorkerInfo
+	for _, w := range r.listFresh(time.Now()) {
+		if !slices.Contains(w.Tasks, task) || !slices.Contains(w.MediaTypes, "video") || !slices.Contains(w.InputFormats, format) || !slices.Contains(w.Protocols, protocol) || w.atCapacity() {
+			continue
+		}
+		if best == nil || w.loadScore() < best.loadScore() {
+			copy := w
+			best = &copy
+		}
+	}
+	if best == nil {
+		return WorkerInfo{}, ErrNoWorkerAvailable
+	}
+	w := r.workers[best.ID]
+	w.ActiveStreams++
+	r.workers[w.ID] = w
+	return w, nil
+}
+func (r *WorkerRegistry) ReleaseVideoTask(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if w, ok := r.workers[id]; ok && w.ActiveStreams > 0 {
+		w.ActiveStreams--
+		r.workers[id] = w
+	}
 }
 
 // NewWorkerRegistry tạo registry mới.

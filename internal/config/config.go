@@ -140,6 +140,7 @@ type AudioSection struct {
 
 // VideoSection cấu hình video ingest + decode + AI segmentation
 type VideoSection struct {
+	Gesture           GestureSection `yaml:"gesture"`
 	Enabled           bool           `yaml:"enabled"`
 	WorkerCount       int            `yaml:"worker_count"`
 	JobQueueSize      int            `yaml:"job_queue_size"`
@@ -154,6 +155,14 @@ type VideoSection struct {
 	AI                VideoAISection `yaml:"ai"`
 }
 
+type GestureSection struct {
+	Enabled        bool `yaml:"enabled"`
+	InferFPS       int  `yaml:"infer_fps"`
+	MaxDimension   int  `yaml:"max_dimension"`
+	MaxHands       int  `yaml:"max_hands"`
+	FrameQueueSize int  `yaml:"frame_queue_size"`
+}
+
 // VideoAISection cấu hình AI Stream Manager cho nhánh video.
 type VideoAISection struct {
 	GRPCTarget       string `yaml:"grpc_target"`
@@ -161,6 +170,12 @@ type VideoAISection struct {
 	StreamTimeoutSec int    `yaml:"stream_timeout_sec"`
 	MaxRetry         int    `yaml:"max_retry"`
 	RetryBackoffMs   int    `yaml:"retry_backoff_ms"`
+
+	EngineTarget       string               `yaml:"engine_target"`
+	SourceMaxDimension int                  `yaml:"source_max_dimension"`
+	OpenTimeoutMs      int                  `yaml:"open_timeout_ms"`
+	SendTimeoutMs      int                  `yaml:"send_timeout_ms"`
+	Workers            []VideoWorkerSection `yaml:"workers"` // Explicit task routes; overrides grpc_target when nonempty.
 }
 
 // AISection cấu hình kết nối tới AI worker và gRPC stream.
@@ -178,8 +193,8 @@ type AISection struct {
 
 // ResultSection cấu hình Result Dispatcher.
 type ResultSection struct {
-	DispatcherWorkers   int  `yaml:"dispatcher_workers"`
-	QueueSize           int  `yaml:"queue_size"`
+	DispatcherWorkers   int  `yaml:"dispatcher_workers"` // per task lane (default, video_segment, gesture_recognition)
+	QueueSize           int  `yaml:"queue_size"`         // dispatcher capacity per task lane
 	DropPartialWhenFull bool `yaml:"drop_partial_when_full"`
 	SendTimeoutMs       int  `yaml:"send_timeout_ms"`
 }
@@ -260,6 +275,7 @@ func Default() GatewayConfig {
 			ChunkMs:          100,
 		},
 		Video: VideoSection{
+			Gesture:           GestureSection{InferFPS: 15, MaxDimension: 640, MaxHands: 4, FrameQueueSize: 2},
 			Enabled:           false,
 			WorkerCount:       8,
 			JobQueueSize:      1024,
@@ -272,10 +288,13 @@ func Default() GatewayConfig {
 			DefaultEffectType: "bg_blur",
 			FrameQueueSize:    3, // queue ngắn, drop-oldest — ưu tiên latency hơn đầy đủ
 			AI: VideoAISection{
-				MaxActiveStreams: 500, // khớp ai.max_active_video_streams
-				StreamTimeoutSec: 300,
-				MaxRetry:         3,
-				RetryBackoffMs:   1000,
+				SourceMaxDimension: 640,
+				OpenTimeoutMs:      5000,
+				SendTimeoutMs:      5000,
+				MaxActiveStreams:   500, // khớp ai.max_active_video_streams
+				StreamTimeoutSec:   300,
+				MaxRetry:           3,
+				RetryBackoffMs:     1000,
 			},
 		},
 		AI: AISection{
@@ -324,6 +343,26 @@ func Load(path string) (GatewayConfig, error) {
 	defer f.Close()
 	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
 		return GatewayConfig{}, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if err := cfg.normalizeVideoWorkers(); err != nil {
+		return GatewayConfig{}, err
+	}
+	if cfg.Video.Gesture.Enabled {
+		g := cfg.Video.Gesture
+		hasGestureWorker := cfg.Video.AI.EngineTarget != ""
+		for _, worker := range cfg.ToVideoWorkers() {
+			for _, task := range worker.Tasks {
+				if task == "gesture_recognition" {
+					hasGestureWorker = true
+				}
+			}
+		}
+		if !cfg.Video.Enabled || !hasGestureWorker {
+			return GatewayConfig{}, fmt.Errorf("gesture requires video.enabled and a gesture worker in video.ai.workers or video.ai.grpc_target")
+		}
+		if g.InferFPS < 1 || g.InferFPS > 60 || g.MaxDimension < 32 || g.MaxDimension > 1920 || g.MaxHands < 1 || g.MaxHands > 8 || g.FrameQueueSize < 1 || g.FrameQueueSize > 32 {
+			return GatewayConfig{}, fmt.Errorf("invalid gesture FPS/dimension/hands/queue limits")
+		}
 	}
 	return cfg, nil
 }
@@ -395,6 +434,9 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		VideoInferFPS:    c.Video.InferFPS,
 		VideoJPEGQuality: c.Video.JPEGQuality,
 		VideoEffectType:  c.Video.DefaultEffectType,
+		GestureEnabled:   c.Video.Gesture.Enabled, GestureFPS: c.Video.Gesture.InferFPS,
+		GestureMaxDimension: c.Video.Gesture.MaxDimension, GestureMaxHands: c.Video.Gesture.MaxHands, GestureQueueSize: c.Video.Gesture.FrameQueueSize,
+		VideoEngine: c.Video.AI.EngineTarget != "", VideoSourceMaxDimension: c.Video.AI.SourceMaxDimension,
 	}
 }
 
@@ -410,12 +452,21 @@ func (c GatewayConfig) ToVideoWorkerPoolConfig() pipeline.VideoWorkerPoolConfig 
 // Tái dùng đúng struct ai.Config với audio (field ý nghĩa chung), chỉ khác
 // giá trị — capacity của nhánh video nên đặt độc lập trong video.ai.* của YAML.
 func (c GatewayConfig) ToVideoAIConfig() ai.Config {
-	return ai.Config{
+	cfg := ai.Config{
 		MaxActiveStreams: c.Video.AI.MaxActiveStreams,
 		StreamTimeout:    time.Duration(c.Video.AI.StreamTimeoutSec) * time.Second,
 		MaxRetries:       c.Video.AI.MaxRetry,
 		RetryBackoff:     time.Duration(c.Video.AI.RetryBackoffMs) * time.Millisecond,
 	}
+	if c.Video.AI.EngineTarget != "" {
+		cfg.StreamTimeout = 0
+		cfg.SendTimeout = time.Duration(c.Video.AI.SendTimeoutMs) * time.Millisecond
+		// A source may wait for RTP or pause while audio/call control stays
+		// active. Worker progress is timed by the engine only while inference
+		// is outstanding; an unconditional receive timer would kill idle video.
+		cfg.RecvIdleTimeout = 0
+	}
+	return cfg
 }
 
 // ToGRPCKeepalive trả về keepalive durations cho SharedConnPool.

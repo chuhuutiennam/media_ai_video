@@ -7,6 +7,7 @@ package coordinator
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,11 +33,15 @@ type Config struct {
 	CallbackClient  *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
 
 	// Video defaults — dùng khi session không tự chỉ định (Session.VideoInferWidth == 0, v.v.)
-	VideoMaxWidth, VideoMaxHeight     int // ngưỡng an toàn cho decoder; 0 = default C++ (3840x2160)
-	VideoInferWidth, VideoInferHeight int
-	VideoInferFPS                     int
-	VideoJPEGQuality                  int
-	VideoEffectType                   string // default effect nếu session không set
+	VideoMaxWidth, VideoMaxHeight                                      int // ngưỡng an toàn cho decoder; 0 = default C++ (3840x2160)
+	VideoInferWidth, VideoInferHeight                                  int
+	VideoInferFPS                                                      int
+	VideoJPEGQuality                                                   int
+	VideoEffectType                                                    string // default effect nếu session không set
+	GestureEnabled                                                     bool
+	GestureFPS, GestureMaxDimension, GestureMaxHands, GestureQueueSize int
+	VideoEngine                                                        bool
+	VideoSourceMaxDimension                                            int
 }
 
 // DefaultConfig trả về cấu hình phù hợp cho production ASR.
@@ -70,8 +75,9 @@ type Coordinator struct {
 	videoPool *pipeline.VideoWorkerPool
 	videoAI   *ai.VideoManager
 
-	mu         sync.RWMutex
-	jitterBufs map[string]*jitter.Buffer // sessionID → active jitter buffer
+	mu          sync.RWMutex
+	videoJitter jitter.Counters
+	jitterBufs  map[string]*jitter.Buffer // sessionID → active jitter buffer
 }
 
 // WithVideo gắn Video Worker Pool + Video AI Manager vào Coordinator.
@@ -150,6 +156,10 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 
 	// 5. Result pump goroutine, luôn chạy dù audio hay video-only.
 	go c.resultPump(sess)
+	if sess.VideoEnabled {
+		go c.pumpResults(sess, sess.VideoMaskResultQueue)
+		go c.pumpResults(sess, sess.GestureResultQueue)
+	}
 
 	// 6. Cleanup sau khi session đóng.
 	go func() {
@@ -170,8 +180,7 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 // sess.VideoEnabled == true, sau khi Start() đã thành công). Đối xứng với
 // Start():
 //  1. Đăng ký session với VideoWorkerPool (RTP → decode chain)
-//  2. Mở AI video stream (frameIn=VideoFrameQueue, resultOut=ResultQueue — DÙNG CHUNG
-//     ResultQueue với audio nên mask kết quả đi qua đúng resultPump/Dispatcher hiện có)
+//  2. Mở AI stream với queue kết quả riêng cho mask và gesture (kể cả source RPC).
 //  3. Video jitter pump: VideoPacketQueue → jitter buffer riêng → VideoWorkerPool.Submit
 //  4. Cleanup: khi sess.Ctx.Done() → UnregisterSession + videoAI.Close()
 //
@@ -182,6 +191,10 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	}
 	if !sess.VideoEnabled {
 		return fmt.Errorf("coordinator: session %s does not have video enabled", sess.ID)
+	}
+	gestureOnly := strings.EqualFold(sess.Task, "gesture_recognition")
+	if gestureOnly && !c.cfg.GestureEnabled {
+		return fmt.Errorf("coordinator: gesture_recognition requires video.gesture.enabled=true")
 	}
 
 	streamID := sess.ID
@@ -202,18 +215,47 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		inferFPS = c.cfg.VideoInferFPS
 	}
 	effect := sess.EffectType
-	if effect == "" {
+	if gestureOnly {
+		effect = ""
+	} else if effect == "" {
 		effect = c.cfg.VideoEffectType
 	}
 
 	poolCfg := pipeline.VideoSessionConfig{
 		MaxWidth: maxW, MaxHeight: maxH,
 		InferWidth: inferW, InferHeight: inferH,
-		InferFPS:    float64(inferFPS),
-		JPEGQuality: c.cfg.VideoJPEGQuality,
-		SessionID:   sess.ID,
-		StreamID:    streamID,
-		EffectType:  effect,
+		InferFPS:            float64(inferFPS),
+		JPEGQuality:         c.cfg.VideoJPEGQuality,
+		SessionID:           sess.ID,
+		StreamID:            streamID,
+		EffectType:          effect,
+		DisableSegmentation: gestureOnly,
+	}
+	var gestureQueue chan pipeline.VideoFrame
+	var gestureStream string
+	if c.cfg.GestureEnabled && !c.cfg.VideoEngine {
+		if c.cfg.GestureFPS < 1 || c.cfg.GestureQueueSize < 1 {
+			return fmt.Errorf("invalid gesture profile")
+		}
+		gestureQueue = make(chan pipeline.VideoFrame, c.cfg.GestureQueueSize)
+		gestureStream = canonicalVideoID(sess.ID)
+		poolCfg.Gesture = &pipeline.GestureOutputConfig{StreamID: gestureStream, FPS: c.cfg.GestureFPS, MaxDimension: c.cfg.GestureMaxDimension, Output: gestureQueue}
+	}
+	var source *ai.SourceStreamConfig
+	if c.cfg.VideoEngine {
+		streamID = canonicalVideoID(sess.ID)
+		poolCfg.StreamID, poolCfg.SourceMaxDimension = streamID, c.cfg.VideoSourceMaxDimension
+		poolCfg.InferFPS = 0
+		source = &ai.SourceStreamConfig{InputMaxDimension: c.cfg.VideoSourceMaxDimension}
+		if !gestureOnly {
+			source.Segmentation = &ai.VideoStreamConfig{EffectType: effect, InferWidth: inferW, InferHeight: inferH, InferFPS: inferFPS}
+			poolCfg.InferFPS = float64(inferFPS)
+		}
+		if c.cfg.GestureEnabled {
+			source.Gesture = &ai.VideoStreamConfig{InferFPS: c.cfg.GestureFPS, MaxHands: c.cfg.GestureMaxHands, InferWidth: c.cfg.GestureMaxDimension}
+			poolCfg.InferFPS = max(poolCfg.InferFPS, float64(c.cfg.GestureFPS))
+		}
+		source.InputFPS = int(poolCfg.InferFPS)
 	}
 	if err := c.videoPool.RegisterSession(sess.Ctx, poolCfg, sess.VideoFrameQueue); err != nil {
 		return fmt.Errorf("coordinator: register video session: %w", err)
@@ -225,11 +267,27 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		InferHeight: inferH,
 		InferFPS:    inferFPS,
 	}
-	// resultOut = sess.ResultQueue: mask kết quả đi qua đúng resultPump() có sẵn
-	// (đã chạy từ Start()) → Dispatcher → Sink, không cần pump/sink riêng cho video.
-	if _, err := c.videoAI.Open(sess.Ctx, sess.ID, streamID, streamCfg, sess.VideoFrameQueue, sess.ResultQueue); err != nil {
-		c.videoPool.UnregisterSession(sess.ID)
-		return fmt.Errorf("coordinator: open video AI stream: %w", err)
+	// Each task has its own result queue and pump, started by Start().
+	if source != nil {
+		cfg := ai.VideoStreamConfig{Source: source, SelectedService: sess.Task,
+			MediaEpoch: fmt.Sprintf("%s-%d", streamID, sess.CreatedAt.UnixNano()), GestureResultOut: sess.GestureResultQueue}
+		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, streamID, cfg, sess.VideoFrameQueue, sess.VideoMaskResultQueue); err != nil {
+			c.videoPool.UnregisterSession(sess.ID)
+			return fmt.Errorf("coordinator: open source stream: %w", err)
+		}
+	} else if !gestureOnly {
+		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, streamID, streamCfg, sess.VideoFrameQueue, sess.VideoMaskResultQueue); err != nil {
+			c.videoPool.UnregisterSession(sess.ID)
+			return fmt.Errorf("coordinator: open video AI stream: %w", err)
+		}
+	}
+	if gestureQueue != nil {
+		cfg := ai.VideoStreamConfig{AIService: "gesture_recognition", SelectedService: sess.Task, MediaEpoch: fmt.Sprintf("%s-%d", gestureStream, sess.CreatedAt.UnixNano()), InferFPS: c.cfg.GestureFPS, MaxHands: c.cfg.GestureMaxHands}
+		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, gestureStream, cfg, gestureQueue, sess.GestureResultQueue); err != nil {
+			c.videoAI.Close(sess.ID)
+			c.videoPool.UnregisterSession(sess.ID)
+			return fmt.Errorf("coordinator: open gesture task: %w", err)
+		}
 	}
 
 	c.startVideoJitterPump(sess)
@@ -254,7 +312,7 @@ func (c *Coordinator) startVideoJitterPump(sess *session.Session) {
 		jitterOutSize = 16
 	}
 	jitterOut := make(chan pipeline.MediaPacket, jitterOutSize)
-	buf := jitter.New(c.cfg.JitterConfig)
+	buf := jitter.NewWithCounters(c.cfg.JitterConfig, &c.videoJitter)
 
 	c.mu.Lock()
 	c.jitterBufs[sess.ID] = buf
@@ -285,6 +343,16 @@ func (c *Coordinator) startVideoJitterPump(sess *session.Session) {
 			}
 		}
 	}()
+}
+
+func canonicalVideoID(id string) string {
+	for _, leg := range []string{"tcore", "taccess"} {
+		suffix := "-" + leg
+		if strings.HasSuffix(id, suffix) {
+			return strings.TrimSuffix(id, suffix) + ":" + leg + ":video"
+		}
+	}
+	return id + ":video"
 }
 
 // startJitterPump khởi động 3 goroutine per-session:
@@ -331,6 +399,10 @@ func (c *Coordinator) startJitterPump(sess *session.Session) {
 }
 
 func (c *Coordinator) resultPump(sess *session.Session) {
+	c.pumpResults(sess, sess.ResultQueue)
+}
+
+func (c *Coordinator) pumpResults(sess *session.Session, input <-chan pipeline.RecognitionResult) {
 	streamID := sess.ID
 	if sess.TrackID != "" {
 		streamID = sess.TrackID
@@ -339,7 +411,7 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 		select {
 		case <-sess.Ctx.Done():
 			return
-		case r := <-sess.ResultQueue:
+		case r := <-input:
 			if r.VideoMask != nil && r.VideoMask.Status != "ok" {
 				zap.L().Debug("coordinator: video mask error — dropped",
 					zap.String("session_id", sess.ID),
@@ -359,6 +431,19 @@ func (c *Coordinator) resultPump(sess *session.Session) {
 			}
 			if r.MediaResources == nil && sess.MediaResources != nil {
 				r.MediaResources = sess.MediaResources
+			}
+			if r.IsVideoGesture() && r.GestureResult != nil {
+				g := r.GestureResult
+				zap.L().Debug("gesture: hand snapshot", zap.String("session_id", r.SessionID), zap.String("stream_id", r.StreamID), zap.Int64("frame_id", g.FrameID), zap.Int("hands", len(g.Hands)))
+				for _, h := range g.Hands {
+					if len(h.Center) != 2 || len(h.BBox) != 4 {
+						continue
+					}
+					zap.L().Debug("gesture: hand", zap.String("session_id", r.SessionID), zap.String("stream_id", r.StreamID), zap.Int64("frame_id", g.FrameID),
+						zap.Uint64("track_id", h.TrackID), zap.String("gesture", h.StableLabel), zap.Float64("score", h.RawScore), zap.Any("center", h.Center), zap.Any("bbox", h.BBox),
+						zap.Any("center_px", []int{int(h.Center[0] * float64(g.OriginalWidth)), int(h.Center[1] * float64(g.OriginalHeight))}),
+						zap.Any("bbox_px", []int{int(h.BBox[0] * float64(g.OriginalWidth)), int(h.BBox[1] * float64(g.OriginalHeight)), int(h.BBox[2] * float64(g.OriginalWidth)), int(h.BBox[3] * float64(g.OriginalHeight))}))
+				}
 			}
 			zap.L().Debug("ai: result received",
 				zap.String("session_id", r.SessionID),
@@ -400,6 +485,17 @@ func (c *Coordinator) UpdateCallbackSink(sessID, newURL string) *result.HTTPCall
 	cbSink := c.newCallbackSink(newURL)
 	c.dispatcher.ReplaceHTTPSink(sessID, cbSink)
 	return cbSink
+}
+
+// UpdateTaskCallbackSink configures a video-task HTTP endpoint independently of
+// the session fallback. Empty URL restores the fallback.
+func (c *Coordinator) UpdateTaskCallbackSink(sessID, task, rawURL string) *result.HTTPCallbackSink {
+	var sink *result.HTTPCallbackSink
+	if rawURL != "" {
+		sink = c.newCallbackSink(rawURL)
+	}
+	c.dispatcher.ReplaceTaskHTTPSink(sessID, task, sink)
+	return sink
 }
 
 // StartMockResultPump giả lập kết quả ASR mỗi 1 giây cho môi trường test.
@@ -458,3 +554,6 @@ func (c *Coordinator) AggregateJitterStats() (received, released, dropped, lost 
 	}
 	return
 }
+
+// VideoJitterStats includes closed sessions; counters do not retain buffer references.
+func (c *Coordinator) VideoJitterStats() jitter.Stats { return c.videoJitter.Stats() }

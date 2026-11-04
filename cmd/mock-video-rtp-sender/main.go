@@ -3,14 +3,17 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/pion/rtp"
+	"golang.org/x/net/http2"
 )
 
 func main() {
@@ -24,7 +27,13 @@ func main() {
 	inspect := flag.Bool("inspect", false, "describe input capture streams as JSON without sending")
 	pcapStream := flag.Int("pcap-stream", 0, "H264 stream index in capture; see --inspect")
 	framesDir := flag.String("frames-dir", "", "save original decoded frames and RTP timestamp index here")
+	playoutURL := flag.String("mf-start-url", "", "POST source-start to HTTP/2 MF after frame preparation, before RTP")
+	deferPNG := flag.Bool("defer-source-png", false, "MF exports source PNG debug after realtime capture; requires frames-dir and mf-start-url")
 	flag.Parse()
+	if *deferPNG && (*framesDir == "" || *playoutURL == "") {
+		fmt.Fprintln(os.Stderr, "--defer-source-png requires --frames-dir and --mf-start-url")
+		os.Exit(2)
+	}
 	var err error
 	if *inspect {
 		var capture bool
@@ -39,7 +48,7 @@ func main() {
 			}
 		}
 	} else {
-		err = send(*target, *width, *height, *fps, *duration, *input, uint32(*ssrc), *pcapStream, *framesDir)
+		err = send(*target, *width, *height, *fps, *duration, *input, uint32(*ssrc), *pcapStream, *framesDir, *playoutURL, *deferPNG)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -47,7 +56,7 @@ func main() {
 	}
 }
 
-func send(target string, width, height, fps int, duration time.Duration, input string, ssrc uint32, streamIndex int, framesDir string) error {
+func send(target string, width, height, fps int, duration time.Duration, input string, ssrc uint32, streamIndex int, framesDir string, playoutURL string, deferPNG bool) error {
 	if duration <= 0 {
 		return fmt.Errorf("duration must be positive")
 	}
@@ -74,7 +83,7 @@ func send(target string, width, height, fps int, duration time.Duration, input s
 		return err
 	}
 	if framesDir != "" {
-		if err := dumpFrames(framesDir, packets); err != nil {
+		if err := dumpFramesWithOptions(framesDir, packets, !deferPNG); err != nil {
 			return fmt.Errorf("save source frames: %w", err)
 		}
 	}
@@ -83,6 +92,21 @@ func send(target string, width, height, fps int, duration time.Duration, input s
 		return err
 	}
 	defer conn.Close()
+	if playoutURL != "" {
+		transport := &http2.Transport{AllowHTTP: true, DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}}
+		client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+		response, err := client.Post(playoutURL, "application/json", nil)
+		if err != nil {
+			return fmt.Errorf("MF source start: %w", err)
+		}
+		response.Body.Close()
+		transport.CloseIdleConnections()
+		if response.StatusCode != http.StatusOK {
+			return fmt.Errorf("MF source start: HTTP %d", response.StatusCode)
+		}
+	}
 	start := time.Now()
 	frames := 0
 	for _, item := range packets {

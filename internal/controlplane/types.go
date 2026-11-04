@@ -17,6 +17,8 @@ type MediaResourceInfo struct {
 	ContextID   string          `json:"contextId"`
 	Termination TerminationInfo `json:"termination"`
 	CallbackURL string          `json:"callbackUrl,omitempty"`
+
+	CallbackURLs map[string]string `json:"callbackUrls,omitempty"` // optional video_segment / gesture_recognition overrides
 }
 
 // MediaResources giữ thông tin tCore và tAccess termination từ DCSF ctrl-result.

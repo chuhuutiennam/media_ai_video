@@ -40,7 +40,8 @@ type Stats struct {
 
 // Dispatcher nhận RecognitionResult và phân phối sang đúng sink theo session_id.
 //
-// Luồng: Push() → bounded queue → worker pool → per-session Sink list.
+// Luồng: Push() → task-specific bounded queue → dedicated worker pool → per-session Sink list.
+// Workers and QueueSize are per lane: audio/default, video_segment, gesture_recognition.
 //
 // Drop policy (khi queue đầy):
 //   - Partial result (IsFinal=false) + DropPartialWhenFull=true → drop ngay, trả nil.
@@ -60,14 +61,21 @@ type Dispatcher struct {
 	sentPartial atomic.Uint64
 	sentFinal   atomic.Uint64
 	sendErrors  atomic.Uint64
+
+	maskQueue    chan pipeline.RecognitionResult
+	gestureQueue chan pipeline.RecognitionResult
+	taskHTTP     map[string]map[string]*HTTPCallbackSink // optional task URL overrides
 }
 
 // NewDispatcher tạo Dispatcher với config cho trước.
 func NewDispatcher(cfg Config) *Dispatcher {
 	return &Dispatcher{
-		cfg:   cfg,
-		queue: make(chan pipeline.RecognitionResult, cfg.QueueSize),
-		sinks: make(map[string][]Sink),
+		cfg:          cfg,
+		queue:        make(chan pipeline.RecognitionResult, cfg.QueueSize),
+		maskQueue:    make(chan pipeline.RecognitionResult, cfg.QueueSize),
+		gestureQueue: make(chan pipeline.RecognitionResult, cfg.QueueSize),
+		sinks:        make(map[string][]Sink),
+		taskHTTP:     make(map[string]map[string]*HTTPCallbackSink),
 	}
 }
 
@@ -84,17 +92,19 @@ func (d *Dispatcher) UnregisterSinks(sessionID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.sinks, sessionID)
+	delete(d.taskHTTP, sessionID)
 }
 
 // Push đẩy result vào hàng đợi. Áp dụng drop policy khi queue đầy.
 // Trả về nil khi drop partial (không phải lỗi); trả về ctx.Err() khi ctx done.
 func (d *Dispatcher) Push(ctx context.Context, r pipeline.RecognitionResult) error {
 	d.pushed.Add(1)
+	queue := d.queueFor(r)
 
 	// Non-blocking attempt — try queue before ctx so results that fit are
 	// delivered even when ctx was just cancelled (e.g. session teardown).
 	select {
-	case d.queue <- r:
+	case queue <- r:
 		return nil
 	default:
 		if ctx.Err() != nil {
@@ -111,7 +121,7 @@ func (d *Dispatcher) Push(ctx context.Context, r pipeline.RecognitionResult) err
 
 	// Final result (hoặc DropPartialWhenFull=false): block cho đến khi có chỗ.
 	select {
-	case d.queue <- r:
+	case queue <- r:
 		return nil
 	case <-ctx.Done():
 		d.dropped.Add(1)
@@ -123,22 +133,24 @@ func (d *Dispatcher) Push(ctx context.Context, r pipeline.RecognitionResult) err
 // Mọi worker thoát sạch sau khi ctx bị cancel.
 func (d *Dispatcher) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	for i := 0; i < d.cfg.Workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			d.worker(ctx)
-		}()
+	for _, queue := range []chan pipeline.RecognitionResult{d.queue, d.maskQueue, d.gestureQueue} {
+		for i := 0; i < d.cfg.Workers; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.worker(ctx, queue)
+			}()
+		}
 	}
 	wg.Wait()
 }
 
-func (d *Dispatcher) worker(ctx context.Context) {
+func (d *Dispatcher) worker(ctx context.Context, queue <-chan pipeline.RecognitionResult) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case r := <-d.queue:
+		case r := <-queue:
 			d.dispatch(ctx, r)
 		}
 	}
@@ -151,6 +163,21 @@ func (d *Dispatcher) dispatch(ctx context.Context, r pipeline.RecognitionResult)
 	src := d.sinks[r.SessionID]
 	sinks := make([]Sink, len(src))
 	copy(sinks, src)
+	task := ""
+	if r.IsVideoGesture() {
+		task = "gesture_recognition"
+	} else if r.IsVideoMask() {
+		task = "video_segment"
+	}
+	if override := d.taskHTTP[r.SessionID][task]; override != nil {
+		filtered := sinks[:0]
+		for _, sink := range sinks {
+			if sink.Type() != "http_callback" {
+				filtered = append(filtered, sink)
+			}
+		}
+		sinks = append(filtered, override)
+	}
 	d.mu.RUnlock()
 
 	if len(sinks) == 0 {
@@ -223,4 +250,41 @@ func (d *Dispatcher) ReplaceHTTPSink(sessionID string, sink *HTTPCallbackSink) {
 }
 
 // QueueLen trả về số result đang chờ trong queue.
-func (d *Dispatcher) QueueLen() int { return len(d.queue) }
+func (d *Dispatcher) QueueLen() int { return len(d.queue) + len(d.maskQueue) + len(d.gestureQueue) }
+
+// TaskQueueLen exposes each bounded callback lane without session labels.
+func (d *Dispatcher) TaskQueueLen(task string) int {
+	switch task {
+	case "video_segment":
+		return len(d.maskQueue)
+	case "gesture_recognition":
+		return len(d.gestureQueue)
+	default:
+		return len(d.queue)
+	}
+}
+
+func (d *Dispatcher) queueFor(r pipeline.RecognitionResult) chan pipeline.RecognitionResult {
+	if r.IsVideoGesture() {
+		return d.gestureQueue
+	}
+	if r.IsVideoMask() {
+		return d.maskQueue
+	}
+	return d.queue
+}
+
+// ReplaceTaskHTTPSink overrides only HTTP delivery for one video task. A nil
+// sink removes the override, restoring the session's callback URL.
+func (d *Dispatcher) ReplaceTaskHTTPSink(sessionID, task string, sink *HTTPCallbackSink) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if sink == nil {
+		delete(d.taskHTTP[sessionID], task)
+		return
+	}
+	if d.taskHTTP[sessionID] == nil {
+		d.taskHTTP[sessionID] = make(map[string]*HTTPCallbackSink)
+	}
+	d.taskHTTP[sessionID][task] = sink
+}

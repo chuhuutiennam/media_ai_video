@@ -16,6 +16,7 @@ import (
 
 	"media-ai-gateway/internal/ingress/rawrtp"
 	"media-ai-gateway/internal/pipeline"
+	"media-ai-gateway/internal/result"
 	"media-ai-gateway/internal/session"
 )
 
@@ -164,7 +165,7 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 				}
 				pendingPorts[port] = true
 				if media.video {
-					err = rawrtp.StartVideoSessionListener(leg.sess, s.cfg.RTPBindIP, port, s.portAlloc)
+					err = rawrtp.StartVideoSessionListener(leg.sess, s.cfg.RTPBindIP, port, s.portAlloc, &s.videoIngress)
 				} else {
 					err = rawrtp.StartSessionListener(leg.sess, s.cfg.RTPBindIP, port, s.portAlloc, s.egressQueueFrames())
 				}
@@ -274,6 +275,7 @@ var serviceProfiles = map[string]ServiceProfile{
 	"speech_to_text":       {NeedsAudio: true, Codec: "PCMU", SampleRate: 8000},
 	"realtime_translation": {NeedsAudio: true, Codec: "PCMU", SampleRate: 8000},
 	"change_background":    {NeedsAudio: false, NeedsVideo: true, EffectType: "bg_replace", SingleLeg: true},
+	"gesture_recognition":  {NeedsAudio: false, NeedsVideo: true},
 }
 
 // lookupServiceProfile tra bảng serviceProfiles (case-insensitive). ok=false
@@ -326,6 +328,21 @@ func (s *Server) ctrlResult(c *gin.Context) {
 	}
 
 	if req.MediaResources != nil {
+		for _, resource := range []MediaResourceInfo{req.MediaResources.TCore, req.MediaResources.TAccess} {
+			for task := range resource.CallbackURLs {
+				if task != "video_segment" && task != "gesture_recognition" {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported callbackUrls task: " + task})
+					return
+				}
+			}
+		}
+		taskUpdater, supportsTasks := s.coord.(interface {
+			UpdateTaskCallbackSink(string, string, string) *result.HTTPCallbackSink
+		})
+		if !supportsTasks && (len(req.MediaResources.TCore.CallbackURLs) > 0 || len(req.MediaResources.TAccess.CallbackURLs) > 0) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "task callbacks unsupported by coordinator"})
+			return
+		}
 		zap.L().Debug("dcsf→dcas: ctrl-result media",
 			zap.String("call_id", id),
 			zap.String("tcore_ctx", req.MediaResources.TCore.ContextID),
@@ -357,6 +374,12 @@ func (s *Server) ctrlResult(c *gin.Context) {
 			MediaResources: tcoreMR,
 		}
 		if _, err := s.sessionMgr.Update(id+"-tcore", tcorePatch); err == nil {
+			for task, rawURL := range req.MediaResources.TCore.CallbackURLs {
+				if cb := taskUpdater.UpdateTaskCallbackSink(id+"-tcore", task, rawURL); cb != nil {
+					s.RegisterCallbackSink(cb)
+				}
+			}
+			
 			if cb := s.coord.UpdateCallbackSink(id+"-tcore", tcoreCallbackURL); cb != nil {
 				s.RegisterCallbackSink(cb)
 			}
@@ -378,6 +401,11 @@ func (s *Server) ctrlResult(c *gin.Context) {
 				},
 			}
 			if _, err := s.sessionMgr.Update(id+"-taccess", taccessPatch); err == nil {
+				for task, rawURL := range req.MediaResources.TAccess.CallbackURLs {
+					if cb := taskUpdater.UpdateTaskCallbackSink(id+"-taccess", task, rawURL); cb != nil {
+						s.RegisterCallbackSink(cb)
+					}
+				}
 				if cb := s.coord.UpdateCallbackSink(id+"-taccess", req.MediaResources.TAccess.CallbackURL); cb != nil {
 					s.RegisterCallbackSink(cb)
 				}
@@ -526,6 +554,11 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "# HELP media_ai_dispatcher_queue_len Result dispatcher pending queue depth\n")
 	fmt.Fprintf(w, "# TYPE media_ai_dispatcher_queue_len gauge\n")
 	fmt.Fprintf(w, "media_ai_dispatcher_queue_len %d\n", s.dispatcher.QueueLen())
+	fmt.Fprintln(w, "# HELP media_ai_dispatcher_task_queue_len Pending callback results by independent task lane")
+	fmt.Fprintln(w, "# TYPE media_ai_dispatcher_task_queue_len gauge")
+	for _, task := range []string{"default", "video_segment", "gesture_recognition"} {
+		fmt.Fprintf(w, "media_ai_dispatcher_task_queue_len{task=%q} %d\n", task, s.dispatcher.TaskQueueLen(task))
+	}
 
 	fmt.Fprintf(w, "# HELP media_ai_dispatcher_pushed_total Total results pushed into dispatcher queue\n")
 	fmt.Fprintf(w, "# TYPE media_ai_dispatcher_pushed_total counter\n")

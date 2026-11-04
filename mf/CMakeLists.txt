@@ -1,0 +1,30 @@
+cmake_minimum_required(VERSION 3.16)
+project(mf_cpp LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
+pkg_check_modules(NGHTTP2 REQUIRED IMPORTED_TARGET libnghttp2)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscale)
+find_package(nlohmann_json 3.2 REQUIRED)
+
+# Receive HTTP/2 masks and composite source frames with FFmpeg image I/O.
+add_executable(mf_cpp src/main.cpp src/callback_server.cpp src/renderer.cpp src/image.cpp)
+target_include_directories(mf_cpp PRIVATE include)
+target_link_libraries(mf_cpp PRIVATE Threads::Threads PkgConfig::NGHTTP2 PkgConfig::FFMPEG nlohmann_json::nlohmann_json)
+target_compile_options(mf_cpp PRIVATE -Wall -Wextra -Wpedantic)
+install(TARGETS mf_cpp RUNTIME DESTINATION bin)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(mf_gesture_test tests/gesture_renderer_test.cpp src/renderer.cpp src/image.cpp)
+    target_include_directories(mf_gesture_test PRIVATE include)
+    target_link_libraries(mf_gesture_test PRIVATE Threads::Threads PkgConfig::FFMPEG nlohmann_json::nlohmann_json)
+    target_compile_options(mf_gesture_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME gesture_renderer COMMAND mf_gesture_test)
+endif()

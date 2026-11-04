@@ -139,6 +139,8 @@ type Server struct {
 	grpcPool       *ai.SharedConnPool
 	callbackClient *result.CallbackHTTPClient
 	dcsfPool       *DCSFPool
+
+	videoIngress rawrtp.VideoIngressCounters
 }
 
 // egressQueueFrames trả về số frame buffer cho egress pacer, mặc định 200 nếu không cấu hình.

@@ -14,6 +14,10 @@ type WorkerInfo struct {
 	ActiveStreams int       // số stream đang chạy (từ heartbeat gần nhất)
 	GPULoad      float64   // 0..1; 0 = không có GPU hoặc chưa đo
 	UpdatedAt    time.Time // thời điểm Register() gần nhất
+
+	MediaTypes   []string
+	InputFormats []string
+	Protocols    []string
 }
 
 // Supports trả về true nếu worker có thể xử lý yêu cầu với language và task cho trước.

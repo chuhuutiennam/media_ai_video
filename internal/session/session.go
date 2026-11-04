@@ -89,6 +89,9 @@ type Session struct {
 	mu           sync.Mutex
 	lastPacketAt time.Time
 	status       Status
+
+	VideoMaskResultQueue chan pipeline.RecognitionResult
+	GestureResultQueue   chan pipeline.RecognitionResult
 }
 
 // SetRTPEgress đăng ký hàm gửi RTP egress cho session.

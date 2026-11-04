@@ -1,0 +1,35 @@
+# mediapipe-video configuration
+# All values shown are defaults — comment out any key to keep the default.
+
+logging:
+  level: "INFO"                         # verbosity: DEBUG | INFO | WARNING | ERROR
+  file: "logs/mediapipe-video.log"      # log file path; null = stdout only
+  backup_days: 30                       # number of daily rotated files to keep
+
+server:
+  addr: "127.0.0.1:50052"              # gRPC bind address
+  max_streams: 8                        # max concurrent gRPC streams
+  max_receive_message_bytes: 8388608    # 8 MiB per message (8 << 20)
+  shutdown_grace_secs: 2.0             # graceful shutdown timeout in seconds
+
+mediapipe:
+  model: null                           # path to .tflite model [REQUIRED — set here or via --model]
+  delegate: "auto"                      # compute backend: "gpu" | "cpu" | "auto" (tự động: thử GPU, fallback CPU)
+  foreground_index: null                # confidence_masks plane index; null = auto-detect
+  result_timeout_secs: 10.0            # seconds to wait for each LIVE_STREAM callback
+  gpu_device_index: null               # GPU device index (sets CUDA_VISIBLE_DEVICES); null = system default; CLI --gpu-device-index overrides
+
+segmentation:
+  default_threshold: 0.5               # foreground probability cutoff when frame sends threshold=0
+  max_inference_dim: 4096              # maximum inference width or height in pixels
+  poll_interval_secs: 0.1             # polling interval while waiting for callback
+  allowed_effect_types:
+    - bg_blur
+    - bg_replace
+    - bg_remove
+  max_concurrent_segmenters: 0        # 0 = no limit; for GPU delegate set 4–6 to avoid EGL context exhaustion
+
+metrics:
+  enabled: true                        # expose Prometheus /metrics endpoint
+  port: 9101                           # HTTP port for scraping
+  log_interval_secs: 60               # in ra log mỗi N giây; 0 = tắt

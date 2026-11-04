@@ -245,3 +245,42 @@ func TestSeqDiff(t *testing.T) {
 		}
 	}
 }
+
+// Reproduce the pre-pool loss path without timing sleeps or changing deadlines.
+// A late Push, a duplicate, a full output and a missing seq are distinct causes.
+func TestVideoCountersExplainLossAndSurviveBufferLifetime(t *testing.T) {
+	var totals Counters
+	cfg := Config{BufferMs: 1, MaxLateMs: 120, PacketTimeMs: 1}
+	b := NewWithCounters(cfg, &totals)
+	stale := makePkt(99)
+	stale.ReceivedAtMs -= 1000
+	if b.Push(stale) {
+		t.Fatal("stale packet admitted")
+	}
+	out := make(chan pipeline.MediaPacket, 1)
+	if !b.Push(makePkt(100)) {
+		t.Fatal("valid packet rejected")
+	}
+	now := time.Now().Add(10 * time.Millisecond)
+	b.flush(now, out) // Leave seq 100 in out to force output backpressure.
+	if b.Push(makePkt(100)) {
+		t.Fatal("processed duplicate admitted")
+	}
+	b.Push(makePkt(101))
+	b.flush(now.Add(10*time.Millisecond), out)
+	b.Push(makePkt(103))
+	b.flush(now.Add(20*time.Millisecond), out)
+	st := b.Stats()
+	if st.Pushed != 5 || st.Received != 3 || st.Released != 1 || st.LateDropped != 1 || st.DuplicateDropped != 1 || st.OutputDropped != 2 || st.Dropped != 4 || st.Lost != 1 {
+		t.Fatalf("incorrect per-stage accounting: %+v", st)
+	}
+	if got := totals.Stats(); got.Pushed != st.Pushed || got.Dropped != st.Dropped || got.Released != st.Released {
+		t.Fatalf("aggregate differs: %+v", got)
+	}
+	second := NewWithCounters(cfg, &totals)
+	second.Push(makePkt(200))
+	second.flush(time.Now().Add(10*time.Millisecond), make(chan pipeline.MediaPacket, 1))
+	if got := totals.Stats(); got.Pushed != 6 || got.Released != 2 || got.Dropped != 4 {
+		t.Fatalf("counters lost across buffers: %+v", got)
+	}
+}

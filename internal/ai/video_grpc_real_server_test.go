@@ -4,8 +4,8 @@ package ai
 // thật (network TCP loopback, HTTP/2, codec protowire —
 // videoProtoCodec), KHÔNG dùng VideoStreamClient giả trong bộ nhớ.
 //
-//   - marshalVideoRequest()/unmarshalVideoResponse() encode/decode ĐÚNG
-//     protobuf wire format (không chỉ đúng ở tầng Go struct)
+//   - Generated messages interoperate with the frozen legacy server codec
+//     using the same protobuf wire format (not only Go structs).
 //   - VideoRoutingDialer chọn đúng worker qua WorkerRegistry
 //   - SharedConnPool.VideoDialFunc() mở stream gRPC (HTTP/2, network
 //     loopback) và gửi VideoConfig đầu tiên đúng như AI worker cần
@@ -120,6 +120,7 @@ func TestVideoTransport_RealGRPC_Roundtrip(t *testing.T) {
 	registry.Register(WorkerInfo{
 		ID: "video-worker-1", Addr: addr,
 		Tasks: []string{"video_segment"}, Languages: []string{"*"},
+		MediaTypes: []string{"video"}, InputFormats: []string{"jpeg"}, Protocols: []string{"video_segment"},
 	})
 
 	pool := NewSharedConnPool(0, 0)

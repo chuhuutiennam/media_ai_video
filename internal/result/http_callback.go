@@ -46,6 +46,10 @@ type CallbackHTTPClient struct {
 	preconnOK  bool      // true nếu lần preconnect gần nhất thành công
 	preconnErr string    // thông báo lỗi nếu preconnect thất bại
 	preconnAt  time.Time // thời điểm preconnect được thực hiện
+
+	taskMu                       sync.Mutex
+	taskClients                  map[string]*http.Client
+	readIdleTimeout, pingTimeout time.Duration
 }
 
 // PreconnectStatus là snapshot trạng thái preconnect, dùng cho health/connections API.
@@ -86,6 +90,7 @@ func NewCallbackHTTPClient(timeout, readIdleTimeout, pingTimeout time.Duration) 
 		PingTimeout:     pingTimeout,
 	}
 	return &CallbackHTTPClient{
+		readIdleTimeout: readIdleTimeout, pingTimeout: pingTimeout,
 		client: &http.Client{
 			Transport: &dualH2Transport{h2c: h2c, h2tls: h2tls},
 			Timeout:   timeout,
@@ -140,6 +145,7 @@ func (c *CallbackHTTPClient) NewHTTPCallbackSink(rawURL string, maxRetry int) *H
 		RetryBackoff:   200 * time.Millisecond,
 		AttemptTimeout: c.attemptTimeout,
 		client:         c.client,
+		pool:         	c,
 	}
 }
 
@@ -155,6 +161,9 @@ type callbackPayload struct {
 }
 
 func eventTypeOf(r pipeline.RecognitionResult) string {
+	if r.IsVideoGesture() {
+		return "video.gesture.result"
+	}
 	if r.IsVideoMask() {
 		return "video.mask.result"
 	}
@@ -203,6 +212,7 @@ type HTTPCallbackSink struct {
 	DeadLetter     Sink          // optional; nhận result khi hết retry
 	client         *http.Client
 	retries        atomic.Uint64 // tổng số lần retry đã thực hiện
+	pool 		   *CallbackHTTPClient // shared per-task transports, pooled across sessions
 }
 
 // Retries trả về tổng số lần retry đã thực hiện (không tính lần gửi đầu tiên).
@@ -211,16 +221,32 @@ func (s *HTTPCallbackSink) Retries() uint64 { return s.retries.Load() }
 // NewHTTPCallbackSink tạo HTTPCallbackSink.
 // timeout áp dụng cho từng HTTP/2 request; maxRetry là số lần retry (không kể lần đầu).
 func NewHTTPCallbackSink(rawURL string, timeout time.Duration, maxRetry int) *HTTPCallbackSink {
-	return &HTTPCallbackSink{
-		URL:            rawURL,
-		MaxRetry:       maxRetry,
-		RetryBackoff:   200 * time.Millisecond,
-		AttemptTimeout: timeout,
-		client: &http.Client{
-			Transport: newH2Transport(rawURL),
-			Timeout:   timeout,
-		},
+	pool := &CallbackHTTPClient{client: &http.Client{Transport: newH2Transport(rawURL), Timeout: timeout}}
+	return pool.NewHTTPCallbackSink(rawURL, maxRetry)
+}
+
+// clientFor uses independent connection pools for the video tasks, including
+// when they target the same host. A slow task cannot consume the other task's
+// HTTP/2 concurrent-stream slots or connection-level flow-control window.
+func (c *CallbackHTTPClient) clientFor(r pipeline.RecognitionResult) *http.Client {
+	task := ""
+	if r.IsVideoGesture() {
+		task = "gesture_recognition"
+	} else if r.IsVideoMask() {
+		task = "video_segment"
+ 	}
+	if task == "" {
+		return c.client
 	}
+	c.taskMu.Lock()
+	defer c.taskMu.Unlock()
+	if c.taskClients == nil {
+		c.taskClients = make(map[string]*http.Client)
+	}
+	if c.taskClients[task] == nil {
+		c.taskClients[task] = NewCallbackHTTPClient(c.client.Timeout, c.readIdleTimeout, c.pingTimeout).client
+	}
+	return c.taskClients[task]
 }
 
 // newH2Transport trả về HTTP/2 transport phù hợp với scheme của URL.
@@ -282,8 +308,11 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 			return fmt.Errorf("http_callback: build request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := s.client.Do(req)
+		client := s.client
+		if s.pool != nil {
+			client = s.pool.clientFor(r)
+		}
+		resp, err := client.Do(req)
 		reqCancel()
 		if err != nil {
 			lastErr = fmt.Errorf("http_callback: request: %w", err)

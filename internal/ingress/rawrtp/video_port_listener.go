@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	pionrtp "github.com/pion/rtp"
@@ -13,6 +14,9 @@ import (
 	"media-ai-gateway/internal/session"
 )
 
+// VideoIngressCounters counts this server's video UDP path, including rejected datagrams.
+type VideoIngressCounters struct{ Received, Parsed, ParseErrors, QueueDropped atomic.Uint64 }
+
 // StartVideoSessionListener bind một UDP socket riêng cho track VIDEO của
 // session tại bindIP:port, parse RTP (H264) và forward vào
 // sess.VideoPacketQueue cho tới khi sess.Ctx bị cancel.
@@ -21,9 +25,14 @@ func StartVideoSessionListener(
 	bindIP string,
 	port int,
 	releaser PortReleaser,
+	counters ...*VideoIngressCounters,
 ) error {
 	if !sess.VideoEnabled || sess.VideoPacketQueue == nil {
 		return fmt.Errorf("rtp: video: session has no video queue")
+	}
+	stats := &VideoIngressCounters{}
+	if len(counters) > 0 && counters[0] != nil {
+		stats = counters[0]
 	}
 	addr := net.JoinHostPort(bindIP, strconv.Itoa(port))
 	conn, err := net.ListenPacket("udp", addr)
@@ -50,10 +59,13 @@ func StartVideoSessionListener(
 			if err != nil {
 				return
 			}
+			stats.Received.Add(1)
 			var packet pionrtp.Packet
 			if err := packet.Unmarshal(buf[:n]); err != nil || packet.Version != 2 || len(packet.Payload) == 0 {
+				stats.ParseErrors.Add(1)
 				continue
 			}
+			stats.Parsed.Add(1)
 			hdr := packet.Header
 			if !loggedFirst {
 				loggedFirst = true
@@ -80,6 +92,7 @@ func StartVideoSessionListener(
 				return
 			default:
 				sess.VideoPacketQueueDropped.Add(1)
+				stats.QueueDropped.Add(1)
 			}
 		}
 	}()

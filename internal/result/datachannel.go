@@ -77,6 +77,9 @@ func (s *DataChannelSink) Type() string { return "datachannel" }
 // Returns ErrDataChannelNotOpen if the channel is not yet open, or
 // ErrDataChannelBufferFull if backpressure is exceeded.
 func (s *DataChannelSink) Send(_ context.Context, r pipeline.RecognitionResult) error {
+	if r.IsVideoGesture() {
+		return errors.New("gesture results require an HTTP callback sink")
+	}
 	if s.dc.ReadyState() != pion.DataChannelStateOpen {
 		s.dropped.Add(1)
 		return ErrDataChannelNotOpen

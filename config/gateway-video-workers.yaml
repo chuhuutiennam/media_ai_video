@@ -1,0 +1,53 @@
+# Manual two-worker profile. Start segmentation on :50052 and gesture mock on :50054.
+gateway:
+  id: gw-video-workers
+  raw_rtp_enabled: true
+  webrtc_enabled: false
+  mock_result_pump: false
+server:
+  http_addr: '127.0.0.1:8081'
+  public_url: 'http://127.0.0.1:8081'
+rtp:
+  listen_addr: '127.0.0.1:5006'
+  bind_ip: '127.0.0.1'
+  public_ip: '127.0.0.1'
+  port_start: 41000
+  port_end: 41099
+session:
+  max_sessions: 20
+  idle_timeout_sec: 600
+  per_session_packet_queue: 1024
+pipeline:
+  jitter_out_queue_size: 1024
+ai:
+  grpc_target: ''
+video:
+  enabled: true
+  worker_count: 2
+  job_queue_size: 1024
+  infer_width: 256
+  infer_height: 256
+  infer_fps: 5
+  frame_queue_size: 8
+  jpeg_quality: 80
+  default_effect_type: bg_replace
+  gesture:
+    enabled: true
+    infer_fps: 15
+    max_dimension: 640
+    max_hands: 4
+    frame_queue_size: 8
+  ai:
+    max_active_streams: 40
+    max_retry: 0
+    workers:
+      - id: segmentation-external
+        grpc_target: '127.0.0.1:50052'
+        tasks: [video_segment]
+        max_streams: 8
+      - id: gesture-mock
+        grpc_target: '127.0.0.1:50054'
+        tasks: [gesture_recognition]
+        max_streams: 20
+log:
+  level: debug
