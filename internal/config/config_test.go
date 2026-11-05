@@ -363,6 +363,55 @@ func TestToWebRTCConfig_WithTURN(t *testing.T) {
 	}
 }
 
+// ── gRPC watch / reconnect backoff ───────────────────────────────────────────
+
+func TestDefault_AIReconnect(t *testing.T) {
+	cfg := Default()
+	if !cfg.AI.WatchReconnect {
+		t.Error("AI.WatchReconnect should default to true")
+	}
+	if cfg.AI.ReconnectMaxBackoffMs != 0 || cfg.ToGRPCReconnectMaxBackoff() != 0 {
+		t.Errorf("reconnect max backoff = %d ms / %v, want 0 (gRPC default)",
+			cfg.AI.ReconnectMaxBackoffMs, cfg.ToGRPCReconnectMaxBackoff())
+	}
+}
+
+func TestLoad_AIReconnect_Overrides(t *testing.T) {
+	path := writeTemp(t, `
+ai:
+  watch_reconnect: false
+  reconnect_max_backoff_ms: 5000
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.AI.WatchReconnect {
+		t.Error("AI.WatchReconnect should be false after YAML override")
+	}
+	if got := cfg.ToGRPCReconnectMaxBackoff(); got != 5*time.Second {
+		t.Errorf("ToGRPCReconnectMaxBackoff = %v, want 5s", got)
+	}
+}
+
+func TestLoad_AIReconnectMaxBackoff_Validation(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{
+		{"0", true}, {"1000", true}, {"5000", true}, {"120000", true},
+		{"-1", false}, {"500", false}, {"999", false}, {"120001", false},
+	} {
+		_, err := Load(writeTemp(t, "ai:\n  reconnect_max_backoff_ms: "+tc.value+"\n"))
+		if tc.ok && err != nil {
+			t.Errorf("reconnect_max_backoff_ms=%s: unexpected error %v", tc.value, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("reconnect_max_backoff_ms=%s: want validation error", tc.value)
+		}
+	}
+}
+
 // The binary must pass bounded video queues through to SessionManager. Leaving
 // these at zero silently dropped packets/JPEGs with non-blocking sends.
 func TestVideoSessionQueueConfig(t *testing.T) {

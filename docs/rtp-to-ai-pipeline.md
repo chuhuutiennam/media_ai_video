@@ -142,7 +142,11 @@ HTTP/2 DATA frame → AI worker  /speech.SpeechStream/Recognize
 ```
 - Lazy-init per addr, thread-safe
 - `Preconnect()` trigger async TCP dial khi app start
-- `WatchAndReconnect()` goroutine: phát hiện `TRANSIENT_FAILURE`/`IDLE` → `conn.Connect()` ngay
+- `WatchAndReconnect()` goroutine, một goroutine cho mỗi địa chỉ: `ai.grpc_target`, `video.ai.engine_target`, từng `video.ai.workers[].grpc_target`. Bật/tắt bằng `ai.watch_reconnect` (mặc định `true`).
+  - `IDLE` (worker restart, GOAWAY, hoặc gRPC tự về idle sau 30 phút không dùng): gọi `conn.Connect()` để nối lại ngay. Không có watch thì gRPC để IDLE tới RPC kế tiếp.
+  - `TRANSIENT_FAILURE`: gRPC tự thử lại theo backoff 1s ×1.6 (jitter ±20%), tối đa 120s. `conn.Connect()` không rút ngắn được backoff này. Giới hạn bằng `ai.reconnect_max_backoff_ms` (0 = mặc định gRPC, hoặc 1000..120000).
+  - Log chỉ khi trạng thái đổi: WARN `ai: grpc connection lost` (hoặc `ai: grpc connect failed — will keep retrying` nếu chưa từng READY), INFO `ai: grpc connection restored` kèm `down_ms`. Lúc khởi động có 1 dòng INFO `AI gRPC connection watch active` liệt kê `addrs` và `reconnect_max_backoff`.
+- `WaitReady(ctx, addr)`: chờ kết nối READY (dùng trong test/công cụ).
 
 ---
 

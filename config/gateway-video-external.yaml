@@ -22,6 +22,8 @@ pipeline:
   jitter_out_queue_size: 1024
 ai:
   grpc_target: ''
+  watch_reconnect: true           # áp dụng cả video.ai.workers: nối lại ngay khi worker restart
+  reconnect_max_backoff_ms: 5000  # worker sống lại → gateway nối lại trong <= ~5s (mặc định gRPC tới 120s)
 video:
   enabled: true
   worker_count: 2

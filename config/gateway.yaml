@@ -88,6 +88,9 @@ ai:
   retry_backoff_ms: 1000          # thời gian chờ giữa các lần retry (ms)
   keepalive_time_sec: 30          # gửi HTTP/2 PING tới AI worker sau N giây idle; 0 = tắt
   keepalive_timeout_sec: 10       # đóng conn nếu không nhận PONG trong N giây
+  # Hai key dưới áp dụng cho MỌI kết nối gRPC: ai.grpc_target, video.ai.engine_target, video.ai.workers.
+  watch_reconnect: true           # theo dõi kết nối: worker restart → nối lại ngay; log "connection lost/restored"
+  reconnect_max_backoff_ms: 0     # chờ tối đa giữa 2 lần gRPC tự nối lại khi worker chết; 0 = mặc định gRPC (120s), hoặc 1000..120000
 
 # ── Result dispatcher ──────────────────────────────────────────────────────────
 result:

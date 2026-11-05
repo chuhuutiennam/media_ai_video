@@ -54,6 +54,8 @@ data:
       stream_timeout_sec: 300
       max_retry: 3
       retry_backoff_ms: 1000
+      watch_reconnect: true          # mọi kết nối gRPC (audio + video): nối lại ngay khi worker restart, log lost/restored
+      reconnect_max_backoff_ms: 0    # 0 = mặc định gRPC (120s); hoặc 1000..120000
 
     result:
       dispatcher_workers: 16

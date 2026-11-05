@@ -1014,6 +1014,7 @@ Giá trị playout mặc định:
 | AI result đến muộn | Realtime xét deadline/media TTL; arrival dời lifetime hiển thị; source dùng source timestamp sau seal; xem trace trước khi kết luận drop |
 | HTTP 5xx hoặc lỗi mạng | Sink retry theo cấu hình; hết retry trả send error |
 | HTTP 4xx | Sink không retry |
+| Worker hoặc Engine restart / mất kết nối | RTPGW WARN `ai: grpc connection lost` (addr); gRPC tự thử lại, tối đa `ai.reconnect_max_backoff_ms`; READY lại thì INFO `ai: grpc connection restored` (addr, down_ms). Stream đang chạy chỉ tự mở lại nếu lần dial lại đầu tiên thành công |
 | Không có reaction render khi bật require-gesture | Pixel/timeline validation FAIL dù inference và callback đã drain |
 
 ACK là lưu trong bộ nhớ process, chưa phải durable receipt qua restart. Nhật ký
@@ -1195,6 +1196,13 @@ Direct-worker mẫu ở [gateway-video-external.yaml](../config/gateway-video-ex
 segmentation 5 FPS, gesture 15 FPS, endpoint 50052 và 50053. Engine mẫu ở
 [gateway-video-engine.yaml](../config/gateway-video-engine.yaml), endpoint 50054.
 Đây là FPS cấu hình, không bảo đảm model đạt throughput tương ứng.
+
+Kết nối gRPC tới worker/Engine được theo dõi bởi `ai.watch_reconnect` (mặc định `true`,
+áp dụng cho mọi địa chỉ trong `video.ai.workers`, `video.ai.engine_target` và
+`ai.grpc_target`): worker restart thì RTPGW nối lại ngay, không chờ session kế tiếp.
+`ai.reconnect_max_backoff_ms` giới hạn thời gian chờ giữa các lần gRPC tự nối lại
+khi worker chết lâu (0 = mặc định gRPC, tới 120s); ba file mẫu video đặt `5000`.
+Chi tiết hành vi và log xem [rtp-to-ai-pipeline.md §5](rtp-to-ai-pipeline.md).
 
 Chạy hai model đã khởi động sẵn, runner tự build binary mới nếu không có bin-dir:
 

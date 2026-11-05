@@ -24,6 +24,8 @@ ai:
   grpc_target: ''
   keepalive_time_sec: 30
   keepalive_timeout_sec: 10
+  watch_reconnect: true           # áp dụng cả engine_target: nối lại ngay khi engine restart
+  reconnect_max_backoff_ms: 5000  # engine sống lại → gateway nối lại trong <= ~5s (mặc định gRPC tới 120s)
 video:
   enabled: true
   worker_count: 2

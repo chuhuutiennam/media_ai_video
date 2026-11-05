@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -135,10 +136,19 @@ func main() {
 
 	// Shared gRPC connection pool: 1 conn per AI worker address, dùng chung cho tất cả session.
 	kaTime, kaTimeout := cfg.ToGRPCKeepalive()
-	grpcPool := ai.NewSharedConnPool(kaTime, kaTimeout)
+	grpcPool := ai.NewSharedConnPool(kaTime, kaTimeout, ai.WithReconnectMaxBackoff(cfg.ToGRPCReconnectMaxBackoff()))
+
+	// Địa chỉ gRPC cần WatchAndReconnect (audio, engine, video workers) — không trùng lặp.
+	var grpcWatchAddrs []string
+	addGRPCWatch := func(addr string) {
+		if addr != "" && !slices.Contains(grpcWatchAddrs, addr) {
+			grpcWatchAddrs = append(grpcWatchAddrs, addr)
+		}
+	}
 
 	var aiDialer ai.Dialer
 	if cfg.AI.GRPCTarget != "" {
+		addGRPCWatch(cfg.AI.GRPCTarget)
 		// Seed registry với static worker từ config.
 		// Khi AI worker tự đăng ký qua heartbeat, entry này bị override bởi thông tin live.
 		workerReg.Register(ai.WorkerInfo{
@@ -191,6 +201,7 @@ func main() {
 				Tasks: []string{"video_source"}, MediaTypes: []string{"video"}, InputFormats: []string{"jpeg"},
 				Protocols: []string{"video_source"}, MaxStreams: cfg.Video.AI.MaxActiveStreams})
 			grpcPool.Preconnect(cfg.Video.AI.EngineTarget)
+			addGRPCWatch(cfg.Video.AI.EngineTarget)
 			videoDialer = ai.NewSourceDialer(grpcPool, cfg.Video.AI.EngineTarget,
 				time.Duration(cfg.Video.AI.OpenTimeoutMs)*time.Millisecond)
 			zap.L().Info("video engine source routing active", zap.String("target", cfg.Video.AI.EngineTarget))
@@ -198,6 +209,7 @@ func main() {
 			for _, worker := range videoWorkers {
 				workerReg.Register(worker)
 				grpcPool.Preconnect(worker.Addr)
+				addGRPCWatch(worker.Addr)
 				zap.L().Info("video AI worker registered", zap.String("worker_id", worker.ID),
 					zap.String("target", worker.Addr), zap.Strings("tasks", worker.Tasks), zap.Int("max_streams", worker.MaxStreams))
 			}
@@ -269,8 +281,14 @@ func main() {
 	}
 	go mon.Run(ctx)
 
-	if cfg.AI.GRPCTarget != "" {
-		go grpcPool.WatchAndReconnect(ctx, cfg.AI.GRPCTarget)
+	if cfg.AI.WatchReconnect && len(grpcWatchAddrs) > 0 {
+		for _, addr := range grpcWatchAddrs {
+			go grpcPool.WatchAndReconnect(ctx, addr)
+		}
+		zap.L().Info("AI gRPC connection watch active",
+			zap.Strings("addrs", grpcWatchAddrs),
+			zap.Duration("reconnect_max_backoff", cfg.ToGRPCReconnectMaxBackoff()),
+		)
 	}
 
 	go pool.Run(ctx)

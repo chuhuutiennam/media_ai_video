@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
@@ -237,10 +238,34 @@ type SharedConnPool struct {
 	opts  []grpc.DialOption
 }
 
+// PoolOption tuỳ chỉnh SharedConnPool khi tạo.
+type PoolOption func(*SharedConnPool)
+
+// grpcMinConnectTimeout bằng mặc định của grpc-go; giữ nguyên khi override backoff.
+const grpcMinConnectTimeout = 20 * time.Second
+
+// WithReconnectMaxBackoff giới hạn thời gian chờ tối đa giữa hai lần gRPC tự nối lại
+// một kết nối hỏng (mặc định gRPC: 120s). d <= 0: giữ mặc định gRPC.
+// Các thông số khác giữ đúng mặc định gRPC: base 1s, ×1.6, jitter 0.2, MinConnectTimeout 20s.
+func WithReconnectMaxBackoff(d time.Duration) PoolOption {
+	return func(p *SharedConnPool) {
+		if d <= 0 {
+			return
+		}
+		bc := backoff.DefaultConfig
+		bc.MaxDelay = d
+		p.opts = append(p.opts, grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff:           bc,
+			MinConnectTimeout: grpcMinConnectTimeout,
+		}))
+	}
+}
+
 // NewSharedConnPool tạo pool với keepalive params.
 //   - keepaliveTime: gửi HTTP/2 PING sau khoảng idle này (0 = không PING).
 //   - keepaliveTimeout: đóng conn nếu không nhận PONG sau khoảng này.
-func NewSharedConnPool(keepaliveTime, keepaliveTimeout time.Duration) *SharedConnPool {
+//   - options: tuỳ chọn thêm, ví dụ WithReconnectMaxBackoff.
+func NewSharedConnPool(keepaliveTime, keepaliveTimeout time.Duration, options ...PoolOption) *SharedConnPool {
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
@@ -251,10 +276,14 @@ func NewSharedConnPool(keepaliveTime, keepaliveTimeout time.Duration) *SharedCon
 			PermitWithoutStream: false, // chỉ PING khi có stream active — tránh ENHANCE_YOUR_CALM
 		}))
 	}
-	return &SharedConnPool{
+	p := &SharedConnPool{
 		conns: make(map[string]*grpc.ClientConn),
 		opts:  opts,
 	}
+	for _, o := range options {
+		o(p)
+	}
+	return p
 }
 
 // getOrCreate trả về conn hiện có hoặc tạo conn mới cho addr.
@@ -295,10 +324,18 @@ func (p *SharedConnPool) State(addr string) connectivity.State {
 	return conn.GetState()
 }
 
-// WatchAndReconnect theo dõi trạng thái kết nối tới addr và gọi conn.Connect()
-// ngay khi phát hiện TRANSIENT_FAILURE — thay vì đợi gRPC built-in backoff.
-// Block cho đến khi ctx bị cancel hoặc conn bị Shutdown.
-// Nên gọi dưới dạng goroutine sau Preconnect.
+// WatchAndReconnect theo dõi trạng thái kết nối tới addr. Block cho đến khi ctx bị
+// cancel hoặc conn bị Shutdown. Nên gọi dưới dạng goroutine sau Preconnect.
+//
+//   - IDLE: kết nối đang dùng bị đóng (worker restart, GOAWAY) hoặc gRPC tự về idle sau
+//     30 phút không dùng. gRPC không tự nối lại cho tới RPC kế tiếp, nên gọi conn.Connect()
+//     để nối lại ngay — session mới không phải chờ bắt tay.
+//   - TRANSIENT_FAILURE: gRPC tự thử lại theo backoff (giới hạn bằng WithReconnectMaxBackoff).
+//     conn.Connect() không rút ngắn được backoff nên không gọi.
+//
+// Chỉ log khi trạng thái đổi: Warn "connection lost" (hoặc "connect failed" nếu chưa từng
+// READY) ở lần TRANSIENT_FAILURE đầu tiên, Info "connection restored" khi READY trở lại.
+// IDLE không tính là mất kết nối, tránh log giả mỗi lần gRPC tự về idle.
 func (p *SharedConnPool) WatchAndReconnect(ctx context.Context, addr string) {
 	p.mu.Lock()
 	conn, ok := p.conns[addr]
@@ -308,23 +345,71 @@ func (p *SharedConnPool) WatchAndReconnect(ctx context.Context, addr string) {
 		return
 	}
 
+	everReady := false
+	var downSince time.Time // khác zero khi đang mất kết nối (đã log lost/failed)
+	handle := func(state connectivity.State) bool {
+		switch state {
+		case connectivity.Ready:
+			if !downSince.IsZero() {
+				zap.L().Info("ai: grpc connection restored", zap.String("addr", addr),
+					zap.Int64("down_ms", time.Since(downSince).Milliseconds()))
+				downSince = time.Time{}
+			}
+			everReady = true
+		case connectivity.Idle:
+			conn.Connect()
+		case connectivity.TransientFailure:
+			if downSince.IsZero() {
+				downSince = time.Now()
+				if everReady {
+					zap.L().Warn("ai: grpc connection lost", zap.String("addr", addr))
+				} else {
+					zap.L().Warn("ai: grpc connect failed — will keep retrying", zap.String("addr", addr))
+				}
+			}
+		case connectivity.Shutdown:
+			zap.L().Error("ai: grpc connection shutdown", zap.String("addr", addr))
+			return false
+		}
+		return true
+	}
+
 	state := conn.GetState()
+	if !handle(state) {
+		return
+	}
 	for {
 		if !conn.WaitForStateChange(ctx, state) {
 			return // ctx cancelled
 		}
 		state = conn.GetState()
 		zap.L().Debug("ai: grpc state change", zap.String("addr", addr), zap.Stringer("state", state))
-		switch state {
-		case connectivity.Idle:
-			// Sau GOAWAY (graceful disconnect), conn về IDLE — reconnect ngay.
-			conn.Connect()
-		case connectivity.TransientFailure:
-			zap.L().Warn("ai: grpc transient failure, triggering reconnect", zap.String("addr", addr))
-			conn.Connect()
-		case connectivity.Shutdown:
-			zap.L().Error("ai: grpc connection shutdown", zap.String("addr", addr))
+		if !handle(state) {
 			return
+		}
+	}
+}
+
+// WaitReady blocks until the connection to addr reaches connectivity.Ready,
+// ctx expires, or the connection enters Shutdown.
+// Returns nil when Ready; ctx.Err() on timeout/cancellation; error on Shutdown.
+func (p *SharedConnPool) WaitReady(ctx context.Context, addr string) error {
+	p.mu.Lock()
+	conn, ok := p.conns[addr]
+	p.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("grpc: no connection for %s", addr)
+	}
+	for {
+		state := conn.GetState()
+		if state == connectivity.Ready {
+			return nil
+		}
+		if state == connectivity.Shutdown {
+			return fmt.Errorf("grpc: connection to %s is shutdown", addr)
+		}
+		if !conn.WaitForStateChange(ctx, state) {
+			return ctx.Err()
 		}
 	}
 }

@@ -189,6 +189,10 @@ type AISection struct {
 	RetryBackoffMs      int    `yaml:"retry_backoff_ms"`
 	KeepaliveTimeSec    int    `yaml:"keepalive_time_sec"`    // gửi HTTP/2 PING sau N giây idle; 0 = tắt
 	KeepaliveTimeoutSec int    `yaml:"keepalive_timeout_sec"` // đóng conn nếu không PONG trong N giây
+
+	// Áp dụng cho mọi kết nối gRPC trong pool: ai.grpc_target, video.ai.engine_target, video.ai.workers.
+	WatchReconnect        bool `yaml:"watch_reconnect"`          // theo dõi kết nối: IDLE → nối lại ngay; log lost/restored
+	ReconnectMaxBackoffMs int  `yaml:"reconnect_max_backoff_ms"` // chờ tối đa giữa 2 lần gRPC tự nối lại; 0 = mặc định gRPC (120s), hoặc 1000..120000
 }
 
 // ResultSection cấu hình Result Dispatcher.
@@ -307,6 +311,7 @@ func Default() GatewayConfig {
 			RetryBackoffMs:      1000,
 			KeepaliveTimeSec:    30,
 			KeepaliveTimeoutSec: 10,
+			WatchReconnect:      true,
 		},
 		Result: ResultSection{
 			DispatcherWorkers:   16,
@@ -343,6 +348,9 @@ func Load(path string) (GatewayConfig, error) {
 	defer f.Close()
 	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
 		return GatewayConfig{}, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if v := cfg.AI.ReconnectMaxBackoffMs; v != 0 && (v < 1000 || v > 120000) {
+		return GatewayConfig{}, fmt.Errorf("ai.reconnect_max_backoff_ms must be 0 (gRPC default) or 1000..120000, got %d", v)
 	}
 	if err := cfg.normalizeVideoWorkers(); err != nil {
 		return GatewayConfig{}, err
@@ -473,6 +481,12 @@ func (c GatewayConfig) ToVideoAIConfig() ai.Config {
 func (c GatewayConfig) ToGRPCKeepalive() (keepaliveTime, keepaliveTimeout time.Duration) {
 	return time.Duration(c.AI.KeepaliveTimeSec) * time.Second,
 		time.Duration(c.AI.KeepaliveTimeoutSec) * time.Second
+}
+
+// ToGRPCReconnectMaxBackoff trả về thời gian chờ tối đa giữa các lần gRPC tự nối lại;
+// 0 = giữ mặc định gRPC (120s).
+func (c GatewayConfig) ToGRPCReconnectMaxBackoff() time.Duration {
+	return time.Duration(c.AI.ReconnectMaxBackoffMs) * time.Millisecond
 }
 
 // ToCallbackHTTPClient tạo shared CallbackHTTPClient từ config.
