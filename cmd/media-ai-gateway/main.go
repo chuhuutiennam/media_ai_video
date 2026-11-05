@@ -276,8 +276,11 @@ func main() {
 		Dispatcher:     disp,
 		GRPCPool:       grpcPool,
 		CallbackClient: callbackClient,
-		PortAlloc:      apiSrv.PortAllocator(),
 		SharedIngress:  cfg.RTP.ListenAddr != "",
+	}
+	// Chỉ gán khi pool bật: con trỏ nil gán vào interface sẽ không còn == nil và monitor panic.
+	if pa := apiSrv.PortAllocator(); pa != nil {
+		mon.PortAlloc = pa
 	}
 	go mon.Run(ctx)
 
