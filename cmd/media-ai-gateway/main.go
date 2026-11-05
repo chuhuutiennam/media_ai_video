@@ -56,23 +56,23 @@ import (
 
 func main() {
 	// ── flags ──────────────────────────────────────────────────────────────
-	configFile   := flag.String("config",         envOr("GATEWAY_CONFIG",        ""),      "Path to YAML config file (overrides individual flags)")
-	httpAddr     := flag.String("http-addr",       envOr("GATEWAY_HTTP_ADDR",     ":8080"), "HTTP/2 control plane address")
-	httpCert     := flag.String("http-cert",       envOr("GATEWAY_HTTP_CERT",     ""),      "TLS cert PEM (empty = h2c)")
-	httpKey      := flag.String("http-key",        envOr("GATEWAY_HTTP_KEY",      ""),      "TLS key PEM")
-	rtpAddr      := flag.String("rtp-addr",        envOr("GATEWAY_RTP_ADDR",      ":5004"), "Raw RTP UDP shared listen address")
-	gatewayID    := flag.String("gateway-id",      envOr("GATEWAY_ID",            ""),      "Node identity returned in CREATE response")
-	rtpPublicIP  := flag.String("rtp-public-ip",   envOr("GATEWAY_RTP_PUBLIC_IP", ""),      "Public IP advertised to callers for per-session RTP")
-	rtpBindIP    := flag.String("rtp-bind-ip",     envOr("GATEWAY_RTP_BIND_IP",   ""),      "Local IP to bind per-session UDP sockets")
-	rtpPortStart := flag.Int("rtp-port-start",     0,     "First port in per-session pool (0 = disabled)")
-	rtpPortEnd   := flag.Int("rtp-port-end",       0,     "Last port in per-session pool")
-	chunkMs      := flag.Int("chunk-ms",           500,   "Audio chunk duration sent to AI (ms)")
-	outRate      := flag.Int("out-rate",           16000, "Resample output sample rate (Hz)")
-	workers      := flag.Int("workers",            16,    "Audio pipeline worker pool size")
-	maxSess      := flag.Int("max-sess",           10000, "Maximum concurrent sessions")
-	logLevel     := flag.String("log-level",       "info","Log level: debug|info|warn|error")
-	pcmDumpDir      := flag.String("pcm-dump-dir",      envOr("GATEWAY_PCM_DUMP_DIR",      ""),      "Directory for raw PCM debug dumps (empty = disabled)")
-	mockResultPump  := flag.Bool("mock-result-pump",    false,                                         "Enable mock ASR result pump every 1s (test/lab only)")
+	configFile := flag.String("config", envOr("GATEWAY_CONFIG", ""), "Path to YAML config file (overrides individual flags)")
+	httpAddr := flag.String("http-addr", envOr("GATEWAY_HTTP_ADDR", ":8080"), "HTTP/2 control plane address")
+	httpCert := flag.String("http-cert", envOr("GATEWAY_HTTP_CERT", ""), "TLS cert PEM (empty = h2c)")
+	httpKey := flag.String("http-key", envOr("GATEWAY_HTTP_KEY", ""), "TLS key PEM")
+	rtpAddr := flag.String("rtp-addr", envOr("GATEWAY_RTP_ADDR", ":5004"), "Raw RTP UDP shared listen address")
+	gatewayID := flag.String("gateway-id", envOr("GATEWAY_ID", ""), "Node identity returned in CREATE response")
+	rtpPublicIP := flag.String("rtp-public-ip", envOr("GATEWAY_RTP_PUBLIC_IP", ""), "Public IP advertised to callers for per-session RTP")
+	rtpBindIP := flag.String("rtp-bind-ip", envOr("GATEWAY_RTP_BIND_IP", ""), "Local IP to bind per-session UDP sockets")
+	rtpPortStart := flag.Int("rtp-port-start", 0, "First port in per-session pool (0 = disabled)")
+	rtpPortEnd := flag.Int("rtp-port-end", 0, "Last port in per-session pool")
+	chunkMs := flag.Int("chunk-ms", 500, "Audio chunk duration sent to AI (ms)")
+	outRate := flag.Int("out-rate", 16000, "Resample output sample rate (Hz)")
+	workers := flag.Int("workers", 16, "Audio pipeline worker pool size")
+	maxSess := flag.Int("max-sess", 10000, "Maximum concurrent sessions")
+	logLevel := flag.String("log-level", "info", "Log level: debug|info|warn|error")
+	pcmDumpDir := flag.String("pcm-dump-dir", envOr("GATEWAY_PCM_DUMP_DIR", ""), "Directory for raw PCM debug dumps (empty = disabled)")
+	mockResultPump := flag.Bool("mock-result-pump", false, "Enable mock ASR result pump every 1s (test/lab only)")
 	flag.Parse()
 
 	// ── config ─────────────────────────────────────────────────────────────
@@ -86,20 +86,20 @@ func main() {
 		}
 	} else {
 		cfg = config.Default()
-		cfg.Server.HTTPAddr          = *httpAddr
-		cfg.Server.CertFile          = *httpCert
-		cfg.Server.KeyFile           = *httpKey
-		cfg.RTP.ListenAddr           = *rtpAddr
-		cfg.Gateway.ID               = *gatewayID
-		cfg.RTP.PublicIP             = *rtpPublicIP
-		cfg.RTP.BindIP               = *rtpBindIP
-		cfg.RTP.PortStart            = *rtpPortStart
-		cfg.RTP.PortEnd              = *rtpPortEnd
-		cfg.Audio.ChunkMs            = *chunkMs
-		cfg.Audio.OutputSampleRate   = *outRate
+		cfg.Server.HTTPAddr = *httpAddr
+		cfg.Server.CertFile = *httpCert
+		cfg.Server.KeyFile = *httpKey
+		cfg.RTP.ListenAddr = *rtpAddr
+		cfg.Gateway.ID = *gatewayID
+		cfg.RTP.PublicIP = *rtpPublicIP
+		cfg.RTP.BindIP = *rtpBindIP
+		cfg.RTP.PortStart = *rtpPortStart
+		cfg.RTP.PortEnd = *rtpPortEnd
+		cfg.Audio.ChunkMs = *chunkMs
+		cfg.Audio.OutputSampleRate = *outRate
 		cfg.Pipeline.AudioWorkerCount = *workers
-		cfg.Session.MaxSessions      = *maxSess
-		cfg.Log.Level                = *logLevel
+		cfg.Session.MaxSessions = *maxSess
+		cfg.Log.Level = *logLevel
 		if *pcmDumpDir != "" {
 			cfg.Audio.PCMDumpDir = *pcmDumpDir
 		}
@@ -112,22 +112,22 @@ func main() {
 	defer logger.Sync() //nolint:errcheck
 
 	zap.L().Info("media-ai-gateway starting",
-		zap.String("http_addr",      cfg.Server.HTTPAddr),
-		zap.String("rtp_addr",       cfg.RTP.ListenAddr),
-		zap.String("gateway_id",     cfg.Gateway.ID),
-		zap.String("rtp_public_ip",  cfg.RTP.PublicIP),
-		zap.Ints("rtp_port_range",   []int{cfg.RTP.PortStart, cfg.RTP.PortEnd}),
-		zap.Int("chunk_ms",          cfg.Audio.ChunkMs),
-		zap.Int("out_rate",          cfg.Audio.OutputSampleRate),
-		zap.Int("workers",           cfg.Pipeline.AudioWorkerCount),
-		zap.Int("max_sess",          cfg.Session.MaxSessions),
-		zap.Bool("tls",              cfg.Server.CertFile != ""),
-		zap.Bool("h2c",              cfg.Server.CertFile == ""),
+		zap.String("http_addr", cfg.Server.HTTPAddr),
+		zap.String("rtp_addr", cfg.RTP.ListenAddr),
+		zap.String("gateway_id", cfg.Gateway.ID),
+		zap.String("rtp_public_ip", cfg.RTP.PublicIP),
+		zap.Ints("rtp_port_range", []int{cfg.RTP.PortStart, cfg.RTP.PortEnd}),
+		zap.Int("chunk_ms", cfg.Audio.ChunkMs),
+		zap.Int("out_rate", cfg.Audio.OutputSampleRate),
+		zap.Int("workers", cfg.Pipeline.AudioWorkerCount),
+		zap.Int("max_sess", cfg.Session.MaxSessions),
+		zap.Bool("tls", cfg.Server.CertFile != ""),
+		zap.Bool("h2c", cfg.Server.CertFile == ""),
 	)
 
 	// ── components ─────────────────────────────────────────────────────────
 	sessMgr := session.NewManager(cfg.ToSessionManagerConfig())
-	pool    := pipeline.NewWorkerPool(cfg.ToWorkerPoolConfig())
+	pool := pipeline.NewWorkerPool(cfg.ToWorkerPoolConfig())
 
 	// WorkerRegistry: lưu AI worker nodes.
 	// TTL=0 → static worker từ config không bao giờ expire.
@@ -142,16 +142,17 @@ func main() {
 		// Seed registry với static worker từ config.
 		// Khi AI worker tự đăng ký qua heartbeat, entry này bị override bởi thông tin live.
 		workerReg.Register(ai.WorkerInfo{
-			ID:        "config:" + cfg.AI.GRPCTarget,
-			Addr:      cfg.AI.GRPCTarget,
+			ID:         "config:" + cfg.AI.GRPCTarget,
+			Addr:       cfg.AI.GRPCTarget,
+			Tasks:      []string{"speech_to_text", "realtime_translation"},
 			MaxStreams: cfg.AI.MaxActiveStreams,
 		})
 		aiDialer = ai.NewRoutingDialer(workerReg, grpcPool.DialFunc())
 		// Pre-connect ngay khi khởi động — trigger async TCP dial, không block.
 		grpcPool.Preconnect(cfg.AI.GRPCTarget)
 		zap.L().Info("AI routing dialer active",
-			zap.String("target",            cfg.AI.GRPCTarget),
-			zap.Duration("keepalive_time",    kaTime),
+			zap.String("target", cfg.AI.GRPCTarget),
+			zap.Duration("keepalive_time", kaTime),
 			zap.Duration("keepalive_timeout", kaTimeout),
 		)
 	} else {
@@ -184,19 +185,27 @@ func main() {
 		videoPool = pipeline.NewVideoWorkerPool(cfg.ToVideoWorkerPoolConfig())
 
 		var videoDialer ai.VideoDialer
-		if cfg.Video.AI.GRPCTarget != "" {
-			workerReg.Register(ai.WorkerInfo{
-				ID:         "config-video:" + cfg.Video.AI.GRPCTarget,
-				Addr:       cfg.Video.AI.GRPCTarget,
-				Tasks:      []string{"video_segment"},
-				MaxStreams: cfg.Video.AI.MaxActiveStreams,
-			})
+		videoWorkers := cfg.ToVideoWorkers()
+		if cfg.Video.AI.EngineTarget != "" {
+			workerReg.Register(ai.WorkerInfo{ID: "video-engine:" + cfg.Video.AI.EngineTarget, Addr: cfg.Video.AI.EngineTarget,
+				Tasks: []string{"video_source"}, MediaTypes: []string{"video"}, InputFormats: []string{"jpeg"},
+				Protocols: []string{"video_source"}, MaxStreams: cfg.Video.AI.MaxActiveStreams})
+			grpcPool.Preconnect(cfg.Video.AI.EngineTarget)
+			videoDialer = ai.NewSourceDialer(grpcPool, cfg.Video.AI.EngineTarget,
+				time.Duration(cfg.Video.AI.OpenTimeoutMs)*time.Millisecond)
+			zap.L().Info("video engine source routing active", zap.String("target", cfg.Video.AI.EngineTarget))
+		} else if len(videoWorkers) != 0 {
+			for _, worker := range videoWorkers {
+				workerReg.Register(worker)
+				grpcPool.Preconnect(worker.Addr)
+				zap.L().Info("video AI worker registered", zap.String("worker_id", worker.ID),
+					zap.String("target", worker.Addr), zap.Strings("tasks", worker.Tasks), zap.Int("max_streams", worker.MaxStreams))
+			}
 			videoDialer = ai.NewVideoRoutingDialer(workerReg, grpcPool.VideoDialFunc())
-			grpcPool.Preconnect(cfg.Video.AI.GRPCTarget)
-			zap.L().Info("video AI routing dialer active", zap.String("target", cfg.Video.AI.GRPCTarget))
+			zap.L().Info("video AI routing dialer active", zap.Int("worker_count", len(videoWorkers)))
 		} else {
 			videoDialer = ai.NullVideoDialer{}
-			zap.L().Warn("video.ai.grpc_target not configured — using NullVideoDialer, no mask sẽ được sinh")
+			zap.L().Warn("no video AI workers configured — using NullVideoDialer")
 		}
 		videoAIMgr = ai.NewVideoManager(cfg.ToVideoAIConfig(), videoDialer)
 		coord.WithVideo(videoPool, videoAIMgr)
@@ -262,9 +271,6 @@ func main() {
 
 	if cfg.AI.GRPCTarget != "" {
 		go grpcPool.WatchAndReconnect(ctx, cfg.AI.GRPCTarget)
-	}
-	if cfg.Video.Enabled && cfg.Video.AI.GRPCTarget != "" {
-		go grpcPool.WatchAndReconnect(ctx, cfg.Video.AI.GRPCTarget)
 	}
 
 	go pool.Run(ctx)
