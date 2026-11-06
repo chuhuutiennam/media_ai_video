@@ -19,6 +19,7 @@ struct PlayoutConfig {
     size_t result_bytes = 64 * 1024 * 1024;
     size_t recording_capacity = 32;
     size_t recording_bytes = 64 * 1024 * 1024;
+    size_t legs = 2; // số leg phải render trước khi /finalize (1 cho dịch vụ 1 leg, ví dụ change_background)
 };
 class CapacityError : public std::runtime_error {
 public: using std::runtime_error::runtime_error;

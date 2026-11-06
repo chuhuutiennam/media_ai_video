@@ -7,6 +7,10 @@ set +m  # Each setsid child keeps $! as its process-group ID.
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT=$(cd -- "$SCRIPT_DIR/.." && pwd)
 PYTHON_BIN=${PYTHON:-python3}
+# AI service là repo riêng: mediapipe (change_background) và gesture (video_effects).
+MEDIAPIPE_DIR=${MEDIAPIPE_DIR:-$ROOT/../mediapipe}
+GESTURE_DIR=${GESTURE_DIR:-$ROOT/../gesture}   # emoji cho MF lab và kiểm tra pixel gesture
+MEDIAPIPE_PYTHON=${MEDIAPIPE_PYTHON:-$PYTHON_BIN}   # Python có dependencies của repo mediapipe
 RUN_DIR= FAILURE="" CALL_STARTED=0
 AI_MODE=${AI_MODE:-mock} AI_TARGET=${AI_TARGET:-} MODEL=${MEDIAPIPE_MODEL:-}
 GESTURE_MODE=off
@@ -30,10 +34,12 @@ usage() {
   cat <<'HELP'
 Usage: bash scripts/test-video-e2e.sh [options]
   --ai-mode mock|external|mediapipe  AI mode (default: mock)
-  --gesture-mode off|mock|external  Gesture backend (default: off)
+  --gesture-mode off|mock|external  Gesture backend; only with --gesture-only (default: off)
   --gesture-target HOST:PORT        Required for external gesture; optional separate mock endpoint
-  --require-gesture                Require a rendered reaction per leg; implies --output-video
-  --gesture-only                    Run only gesture_recognition (requires gesture backend, C++ MF)
+  --require-gesture                Require a rendered reaction per leg; implies --output-video; needs --gesture-only
+  --gesture-only                    Run video_effects (gesture) instead of change_background (segmentation)
+One service uses one AI: change_background = segmentation only (repo mediapipe), video_effects = gesture only (repo gesture).
+Both services have one gateway leg (tcore); results go to the MF tAccess endpoint (ctrl-result single-leg).
   --ai-target HOST:PORT             Existing AI; required in external mode
   --model FILE                      Local .tflite model for MediaPipe
   --mediapipe-delegate gpu|cpu      MediaPipe delegate (default: gpu)
@@ -41,7 +47,7 @@ Usage: bash scripts/test-video-e2e.sh [options]
   --input FILE                      Image/video or PCAP/PCAPNG (auto-detect); defaults testsrc2
   --pcap-tcore-stream N             Capture stream index for tCore (default: first H264)
   --pcap-taccess-stream N           Capture stream index for tAccess (default: second, or first if only one)
-  --output-video                    Save source/mask/composited PNGs and output MP4 for both legs
+  --output-video                    Save source/mask/composited PNGs and output MP4 for each leg
   --playout-delay-ms N              Realtime playout buffer (default: 300 ms)
   --mask-max-age-ms N               Segmentation expiry (default: 500 ms)
   --gesture-render-mode MODE       realtime (default) | arrival (latency trace) | source (export after drain)
@@ -60,6 +66,8 @@ Usage: bash scripts/test-video-e2e.sh [options]
   --gw-port N --callback-port N     HTTP ports; 0 selects free ports
   -h, --help                        Show this help
 Environment: AI_MODE, AI_TARGET, MEDIAPIPE_MODEL, TIMEOUT, GW_PORT, CALLBACK_PORT, PYTHON.
+MEDIAPIPE_DIR (default ../mediapipe) and MEDIAPIPE_PYTHON run --ai-mode mediapipe from the mediapipe repo;
+GESTURE_DIR (default ../gesture) provides assets/emoji for gesture runs.
 VIDEO_GATEWAY_LOG_LEVEL=debug enables verbose per-frame/RLE logging (default: info).
 VIDEO_ENGINE_TARGET routes one source stream/leg through an existing video-ai-engine.
 VIDEO_ENGINE_METRICS enables engine admission, fan-out and cleanup assertions.
@@ -234,6 +242,14 @@ main() {
     [[ -z "$BACKGROUND" ]] || fail '--background is not supported for gesture-only; source video is preserved'
   fi
   [[ "$REQUIRE_GESTURE" == 0 || "$GESTURE_MODE" != off ]] || fail '--require-gesture requires gesture mode'
+  # 1 dịch vụ ↔ 1 AI: gesture chỉ chạy như dịch vụ video_effects riêng.
+  [[ "$GESTURE_MODE" == off || "$GESTURE_ONLY" == 1 ]] || fail '--gesture-mode requires --gesture-only (one service uses one AI; change_background is segmentation only)'
+  if [[ "$GESTURE_MODE" != off ]]; then
+    [[ -d "$GESTURE_DIR/assets/emoji" ]] || fail "gesture emoji assets not found: $GESTURE_DIR/assets/emoji (set GESTURE_DIR to the gesture repo)"
+  fi
+  if [[ "$AI_MODE" == mediapipe && "$GESTURE_ONLY" == 0 ]]; then
+    [[ -d "$MEDIAPIPE_DIR/src/mediapipe_video" ]] || fail "mediapipe repo not found: $MEDIAPIPE_DIR (set MEDIAPIPE_DIR)"
+  fi
   command -v "$PYTHON_BIN" > /dev/null || fail "Python 3 is required"
   mkdir -p -- "$ARTIFACTS_DIR"
   ARTIFACTS_DIR=$(cd -- "$ARTIFACTS_DIR" && pwd)
@@ -252,6 +268,7 @@ main() {
   INPUT=$(video_data get options.json input)
   IS_PCAP=$(video_data get options.json pcap)
   MODEL=$(video_data get options.json model)
+  MF_LEGS=$(video_data get options.json mf_legs)
   BACKGROUND=$(video_data background "$BACKGROUND")
   cd "$ROOT"
   GW_BASE="http://127.0.0.1:$GW_PORT"
@@ -301,6 +318,7 @@ main() {
   "$BIN_DIR/mf_cpp" --help > "$RUN_DIR/mf-help.txt" 2>&1
   grep -q -- '--gesture-render-mode' "$RUN_DIR/mf-help.txt" || fail 'mf_cpp lacks gesture render modes; rebuild MF'
   grep -q -- '--events' "$RUN_DIR/mf-help.txt" || fail 'mf_cpp binary is outdated; run scripts/build-mf-cpp.sh'
+  grep -q -- '--legs' "$RUN_DIR/mf-help.txt" || fail 'mf_cpp lacks --legs (single-leg services); rebuild MF'
   if (( OUTPUT_VIDEO )); then
     grep -q -- '--frames-root' "$RUN_DIR/mf-help.txt" || fail 'mf_cpp has no renderer; run scripts/build-mf-cpp.sh'
     grep -q -- 'deferred-source-png' "$RUN_DIR/mf-help.txt" || fail 'mf_cpp lacks raw capture/deferred PNG support; rebuild MF and sender'
@@ -322,8 +340,8 @@ main() {
   if (( ! GESTURE_ONLY )); then
     case "$AI_MODE" in
       mock) start ai "$BIN_DIR/mock-ai-worker" --addr "$AI_TARGET" --log-level debug ;;
-      mediapipe) start ai env PYTHONPATH="$ROOT/workers/mediapipe/src${PYTHONPATH:+:$PYTHONPATH}" \
-        "$PYTHON_BIN" -m mediapipe_video --addr "$AI_TARGET" --model "$MODEL" --delegate "$MEDIAPIPE_DELEGATE" ;;
+      mediapipe) start ai env PYTHONPATH="$MEDIAPIPE_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
+        "$MEDIAPIPE_PYTHON" -m mediapipe_video --addr "$AI_TARGET" --model "$MODEL" --delegate "$MEDIAPIPE_DELEGATE" ;;
     esac
     info "Segmentation backend: mode=$AI_MODE endpoint=$AI_TARGET"
     if [[ "$AI_MODE" == external ]]; then
@@ -346,8 +364,9 @@ main() {
   info 'Step 5 - Start C++ MF callback receiver; POST ANSWER and ctrl-result'
   local mf_args=(--port "$CALLBACK_PORT" --call-id "${RUN_DIR##*/}" --events "$RUN_DIR/mf-events.jsonl")
   if (( OUTPUT_VIDEO )); then mf_args+=(--frames-root "$RUN_DIR/output" --background "$BACKGROUND"); fi
-  if [[ "$GESTURE_MODE" != off ]]; then mf_args+=(--emoji-dir "$ROOT/workers/gesture/assets/emoji"); fi
+  if [[ "$GESTURE_MODE" != off ]]; then mf_args+=(--emoji-dir "$GESTURE_DIR/assets/emoji"); fi
   if (( GESTURE_ONLY )); then mf_args+=(--gesture-only); fi
+  mf_args+=(--legs "$MF_LEGS")
   mf_args+=(--gesture-render-mode "$GESTURE_RENDER_MODE" --playout-delay-ms "$PLAYOUT_DELAY_MS" --mask-max-age-ms "$MASK_MAX_AGE_MS" --gesture-max-age-ms "$GESTURE_MAX_AGE_MS")
   start callback "$BIN_DIR/mf_cpp" "${mf_args[@]}"
   wait_for 'callback ready' "$TIMEOUT_SECONDS" video_data callback-ready
@@ -357,24 +376,27 @@ main() {
   video_data signaling
   verify_snapshot active metrics-active.prom
 
-  info "Step 6 - Send H264 RTP to both legs (${DURATION}s)"
-  local tcore_port taccess_port
-  read -r tcore_port taccess_port < "$RUN_DIR/video-ports.txt"
+  # video-legs.txt: "<gateway leg> <video RTP port> <MF leg>" cho từng leg có trong ANSWER.
+  # Dịch vụ 1 leg: gateway tcore → MF tAccess (ctrl-result single-leg dùng callback của tAccess).
+  local legs=() leg_line session_leg port mf_leg ssrc leg_args mf_base=""
+  mapfile -t legs < "$RUN_DIR/video-legs.txt"
+  info "Step 6 - Send H264 RTP to ${#legs[@]} leg(s) (${DURATION}s)"
   local sender_args=(--width "$WIDTH" --height "$HEIGHT" --fps 30 --duration "${DURATION}s")
   [[ -z "$INPUT" ]] || sender_args+=(--input "$INPUT")
-  local core_args=() access_args=()
-  if [[ "$IS_PCAP" == 1 ]]; then
-    core_args+=(--pcap-stream "$PCAP_TCORE")
-    access_args+=(--pcap-stream "$PCAP_TACCESS")
-  fi
-  if (( OUTPUT_VIDEO )); then
-    local mf_base
-    mf_base=$(cat "$RUN_DIR/mf-url.txt")
-    core_args+=(--defer-source-png --mf-start-url "$mf_base/start/tCore" --frames-dir "$RUN_DIR/output/tcore")
-    access_args+=(--defer-source-png --mf-start-url "$mf_base/start/tAccess" --frames-dir "$RUN_DIR/output/taccess")
-  fi
-  start tcore "$BIN_DIR/mock-video-rtp-sender" --target "127.0.0.1:$tcore_port" --ssrc 88001 "${sender_args[@]}" "${core_args[@]}"
-  start taccess "$BIN_DIR/mock-video-rtp-sender" --target "127.0.0.1:$taccess_port" --ssrc 88002 "${sender_args[@]}" "${access_args[@]}"
+  if (( OUTPUT_VIDEO )); then mf_base=$(cat "$RUN_DIR/mf-url.txt"); fi
+  for leg_line in "${legs[@]}"; do
+    read -r session_leg port mf_leg <<< "$leg_line"
+    leg_args=()
+    ssrc=88001
+    if [[ "$session_leg" == taccess ]]; then ssrc=88002; fi
+    if [[ "$IS_PCAP" == 1 ]]; then
+      if [[ "$session_leg" == tcore ]]; then leg_args+=(--pcap-stream "$PCAP_TCORE"); else leg_args+=(--pcap-stream "$PCAP_TACCESS"); fi
+    fi
+    if (( OUTPUT_VIDEO )); then
+      leg_args+=(--defer-source-png --mf-start-url "$mf_base/start/$mf_leg" --frames-dir "$RUN_DIR/output/${mf_leg,,}")
+    fi
+    start "$session_leg" "$BIN_DIR/mock-video-rtp-sender" --target "127.0.0.1:$port" --ssrc "$ssrc" "${sender_args[@]}" "${leg_args[@]}"
+  done
   if (( OUTPUT_VIDEO )) && [[ "$GESTURE_RENDER_MODE" != source ]]; then
     wait_for 'MF records first realtime frame' "$SENDER_TIMEOUT" mf_render_progress first
   fi
@@ -397,7 +419,8 @@ main() {
   if (( OUTPUT_VIDEO )); then
     info 'Step 10 - Export video from C++ MF recording'
     local leg dir encode_name
-    for leg in tCore tAccess; do
+    for leg_line in "${legs[@]}"; do
+      read -r _ _ leg <<< "$leg_line"
       dir="$RUN_DIR/output/${leg,,}"
       encode_name="encode-${leg,,}"
 
@@ -411,7 +434,7 @@ main() {
     video_data output "$BACKGROUND"
   fi
   if [[ "$GESTURE_MODE" != off && "$OUTPUT_VIDEO" == 1 ]]; then
-    "$PYTHON_BIN" "$ROOT/scripts/validate-gesture-output.py" "$RUN_DIR" "$ROOT/workers/gesture/assets/emoji" || fail 'gesture pixel/timeline validation failed'
+    "$PYTHON_BIN" "$ROOT/scripts/validate-gesture-output.py" "$RUN_DIR" "$GESTURE_DIR/assets/emoji" || fail 'gesture pixel/timeline validation failed'
   fi
   video_data summary
 }
@@ -528,37 +551,50 @@ def callback_events(run):
     return callback_log(run / 'mf-events.jsonl')
 
 
-def validate(state, call_id, infer_size, minimum, duration, gesture=False, segmentation=True, strict_frames=True):
+def leg_resources(legs, mf_leg):
+    """mediaResources mong đợi trên callback. Dịch vụ 1 leg: session tcore mang cả resource tCore
+    và tAccess (ctrl-result single-leg); 2 leg: mỗi session chỉ mang resource của leg mình."""
+    names = ('tCore', 'tAccess') if len(legs) == 1 else (mf_leg,)
+    return {name: {"contextId": f"ctx-{name}", "terminationId": f"term-{name}"} for name in names}
+
+
+def validate(state, call_id, infer_size, minimum, duration, legs, gesture=False, segmentation=True, strict_frames=True):
+    # legs: [[gateway leg, MF leg], ...] — 1 leg: [['tcore', 'tAccess']]; 2 leg: tcore→tCore, taccess→tAccess.
     require(state["answer_status"] == 201, "notify-event ANSWER failed")
     require(state["ctrl_result_status"] == 200, "ctrl-result failed")
-    expected_service = 'change_background' if segmentation else 'gesture_recognition'
+    expected_service = 'change_background' if segmentation else 'video_effects'
     require(state['notify_event']['selectedService'] == expected_service, 'unexpected service profile')
     answer = state["answer"]
     require(answer["rtp_ip"] == "127.0.0.1", "lab RTP IP must be loopback")
     for key in ("codec", "sample_rate", "tcore_rtp_port", "taccess_rtp_port",
                 "tcore_local_non_dc_media", "taccess_local_non_dc_media"):
         require(not answer.get(key), f"video-only call unexpectedly allocated audio: {key}")
-    ports = [answer["tcore_video_rtp_port"], answer["taccess_video_rtp_port"]]
-    require(all(0 < p < 65536 for p in ports) and ports[0] != ports[1], "invalid video RTP ports")
-    for leg, port in zip(("tcore", "taccess"), ports):
+    session_legs = [session_leg for session_leg, _ in legs]
+    for leg in ("tcore", "taccess"):
+        if leg not in session_legs:
+            require(not answer.get(f"{leg}_video_rtp_port") and not answer.get(f"{leg}_local_non_dc_video_media"),
+                    f"{expected_service}: unexpected video leg {leg}")
+    ports = [answer.get(f"{leg}_video_rtp_port") or 0 for leg in session_legs]
+    require(all(0 < p < 65536 for p in ports) and len(set(ports)) == len(ports), "invalid video RTP ports")
+    for leg, port in zip(session_legs, ports):
         sdp = answer[f"{leg}_local_non_dc_video_media"]
         require(sdp["sdpmLine"] == f"video {port} RTP/AVP 96", f"invalid {leg} video SDP")
         require("rtpmap:96 H264/90000" in sdp["sdpaLines"], f"invalid {leg} codec/clock")
-    frames = {"tCore": {}, "tAccess": {}}
+    mf_to_session = {mf_leg: session_leg for session_leg, mf_leg in legs}
+    frames = {mf_leg: {} for _, mf_leg in legs}
     for body in state["callbacks"]:
-        path = body.get("path")
-        require(path in ("/results/tCore", "/results/tAccess"), f"unexpected callback URL path: {path}")
+        path = body.get("path") or ""
+        leg = path.rsplit("/", 1)[-1]
+        require(path.startswith("/results/") and leg in frames, f"unexpected callback URL path: {path}")
         if gesture and body.get("kind") == "video_gesture":
             continue
         require(segmentation, 'gesture-only service received an unexpected segmentation/audio callback')
-        leg = path.rsplit("/", 1)[1]
         require(body["protocol"] == "HTTP/2.0", f"{leg}: callback must use HTTP/2")
         require(body["event_type"] == "video.mask.result" and body["is_final"] is True, f"{leg}: invalid event/final")
         require(body["kind"] == "video_mask", f"{leg}: invalid result kind")
-        require(body["session_id"] == f"{call_id}-{leg.lower()}", f"{leg}: wrong session")
+        require(body["session_id"] == f"{call_id}-{mf_to_session[leg]}", f"{leg}: wrong session")
         require(body["stream_id"] == body["session_id"], f"{leg}: wrong stream")
-        require(body["mediaResources"] == {leg: {"contextId": f"ctx-{leg}", "terminationId": f"term-{leg}"}},
-                f"{leg}: wrong callback termination")
+        require(body["mediaResources"] == leg_resources(legs, leg), f"{leg}: wrong callback termination")
         mask = body["video_mask"]
         require(mask["status"] == "ok", f"{leg}: AI mask error: {mask.get('error_message')}")
         require(mask["mask_width"] == infer_size and mask["mask_height"] == infer_size, f"{leg}: wrong mask dimensions")
@@ -618,7 +654,7 @@ def data_main(folder, action, *args):
         gesture_mode = args[18]
         gesture = gesture_mode != "off"
         segmentation = args[19] != "1"
-        service = 'change_background' if segmentation else 'gesture_recognition'
+        service = 'change_background' if segmentation else 'video_effects'
         gesture_target, require_gesture = args[20], args[21] == '1'
         gesture_render_mode = args[22] if len(args) > 22 else 'realtime'
         require(gesture_render_mode in ('realtime', 'arrival', 'source'), 'invalid --gesture-render-mode')
@@ -626,6 +662,10 @@ def data_main(folder, action, *args):
         require(gesture_mode in ('off', 'mock', 'external'), 'invalid gesture mode')
         require(gesture_mode != 'external' or gesture_target, 'external gesture requires --gesture-target')
         require(segmentation or gesture, 'gesture-only requires gesture mode')
+        require(not (segmentation and gesture), 'one service uses one AI: gesture requires --gesture-only')
+        # [gateway leg, MF leg]: change_background và video_effects chỉ leg tcore, kết quả về MF tAccess
+        # (ctrl-result single-leg). validate()/leg_resources() vẫn hỗ trợ dịch vụ 2 leg (legs: both).
+        legs = [['tcore', 'tAccess']]
         require(mode in ('mock', 'external', 'mediapipe'), 'invalid --ai-mode')
         require(math.isfinite(duration) and 1 <= duration <= 300, 'duration must be in 1..300 seconds')
         require(math.isfinite(timeout) and timeout > 0 and minimum >= 0, 'timeout must be positive; expect-per-leg must be nonnegative')
@@ -667,7 +707,7 @@ def data_main(folder, action, *args):
         drain_timeout = math.ceil(drain_timeout or max(timeout, duration * 3 + dispatch_timeout_ms / 1000))
         save('options.json', dict(mode=mode, mf_mode='cpp', output_video=output_video == '1', ai_target=target, bin_dir=str(Path(binary_dir).resolve()),
             input=str(Path(input_file).resolve()) if input_file else '', model=str(Path(model).resolve()) if model else '',
-            duration=duration, infer_size=size, minimum=minimum, gesture_render_mode=gesture_render_mode, gesture=gesture, gesture_mode=gesture_mode, gesture_target=gesture_target, require_gesture=require_gesture, strict_mock=strict_mock, engine=bool(engine_target), segmentation=segmentation, service=service, minimum_auto=int(args[9]) == 0, pcap=int(capture),
+            duration=duration, infer_size=size, minimum=minimum, gesture_render_mode=gesture_render_mode, gesture=gesture, gesture_mode=gesture_mode, gesture_target=gesture_target, require_gesture=require_gesture, strict_mock=strict_mock, engine=bool(engine_target), segmentation=segmentation, service=service, legs=legs, mf_legs=len(legs), minimum_auto=int(args[9]) == 0, pcap=int(capture),
             callback_timeout_ms=callback_timeout_ms, callback_workers=callback_workers,
             callback_retries=callback_retries, dispatch_timeout_ms=dispatch_timeout_ms,
             drain_timeout_sec=drain_timeout))
@@ -686,21 +726,22 @@ def data_main(folder, action, *args):
             'callback': {'timeout_ms': callback_timeout_ms, 'max_retry': callback_retries},
             'video': {'enabled': True, 'worker_count': 2, 'job_queue_size': 1024, 'infer_width': size,
                       'infer_height': size, 'infer_fps': 5, 'frame_queue_size': 8, 'default_effect_type': 'bg_replace' if segmentation else '',
-                      'gesture': {'enabled': gesture, 'infer_fps': 15, 'max_dimension': 640, 'max_hands': 4, 'frame_queue_size': 8},
-                      'ai': {'grpc_target': target, 'max_retry': 0, 'stream_timeout_sec': math.ceil(duration + drain_timeout + timeout + 120)}},
+                      'gesture': {'infer_fps': 15, 'max_dimension': 640, 'max_hands': 4, 'frame_queue_size': 8},
+                      'ai': {'max_retry': 0, 'stream_timeout_sec': math.ceil(duration + drain_timeout + timeout + 120)}},
             'log': {'level': os.environ.get('VIDEO_GATEWAY_LOG_LEVEL', 'info')},
         }
-        if gesture:
-            routes = {}
-            if segmentation:
-                routes[target] = ['video_segment']
-            routes.setdefault(gesture_target, []).append('gesture_recognition')
-            gateway_config['video']['ai'].pop('grpc_target', None)
-            gateway_config['video']['ai']['workers'] = [
-                dict(id=f'video-worker-{index}', grpc_target=address, tasks=tasks, max_streams=32)
-                for index, (address, tasks) in enumerate(routes.items())]
         if engine_target:
+            # Engine chưa vào video.services: dùng config cũ (cả 2 dịch vụ chỉ leg tcore, gesture khi bật).
+            gateway_config['video']['gesture']['enabled'] = gesture
             gateway_config['video']['ai'] = dict(engine_target=engine_target, source_max_dimension=max(640, size), max_retry=0)
+        else:
+            # Danh mục dịch vụ: đúng 1 dịch vụ đang test, đúng 1 AI service của nó.
+            task, ai_address = ('video_segment', target) if segmentation else ('gesture_recognition', gesture_target)
+            definition = {'legs': 'tcore',
+                          'ai': {'task': task, 'targets': [ai_address], 'max_streams': 32}}
+            if segmentation:
+                definition['effect_type'] = 'bg_replace'
+            gateway_config['video']['services'] = {service: definition}
         save('gateway.yaml', gateway_config)
         save('notify.json', {'callId': run.name, 'event': 'ANSWER', 'selectedService': service})
         return 0
@@ -788,12 +829,13 @@ def data_main(folder, action, *args):
     if action == 'signaling':
         state = dict(notify_event=load('notify.json'), answer_status=201, answer=load('answer.json'),
                      ctrl_result=load('ctrl-result.json'), ctrl_result_status=200, callbacks=[])
-        validate(state, run.name, options['infer_size'], options['minimum'], options['duration'], options['gesture'], options['segmentation'], options['strict_mock'])
+        validate(state, run.name, options['infer_size'], options['minimum'], options['duration'], options['legs'], options['gesture'], options['segmentation'], options['strict_mock'])
         save('signaling.json', state)
-        (run / 'video-ports.txt').write_text(f"{state['answer']['tcore_video_rtp_port']} {state['answer']['taccess_video_rtp_port']}\n")
+        (run / 'video-legs.txt').write_text(''.join(
+            f"{session_leg} {state['answer'][f'{session_leg}_video_rtp_port']} {mf_leg}\n" for session_leg, mf_leg in options['legs']))
         return 0
     if action == 'senders':
-        save('senders.json', {leg: json.loads((run / f'{leg}.log').read_text().strip().splitlines()[-1]) for leg in ('tcore', 'taccess')})
+        save('senders.json', {leg: json.loads((run / f'{leg}.log').read_text().strip().splitlines()[-1]) for leg, _ in options['legs']})
         return 0
     if action == 'summary':
         result = load('result.json')
@@ -803,7 +845,7 @@ def data_main(folder, action, *args):
         result = load('result.json')
         result['realtime_playout'] = load('mf-finalized.json')
         result['gesture_render_mode'] = options.get('gesture_render_mode', 'realtime')
-        result['output_videos'] = {leg: str(run / 'output' / leg.lower() / 'output.mp4') for leg in ('tCore', 'tAccess')}
+        result['output_videos'] = {leg: str(run / 'output' / leg.lower() / 'output.mp4') for _, leg in options['legs']}
         result['background'] = (args[0] or 'black') if options['segmentation'] else 'source'
         for path in result['output_videos'].values():
             require(Path(path).is_file() and Path(path).stat().st_size > 0, f'output video missing: {path}')
@@ -835,15 +877,16 @@ def data_main(folder, action, *args):
     if action != 'drained':
         check_errors(current, baseline, allow_frame_eviction=not options['strict_mock'])
     if action == 'active':
-        require(current['media_ai_rtp_ports_available'] == baseline['media_ai_rtp_ports_available'] - 2, 'expected exactly 2 video ports')
+        legs = len(options['legs'])
+        require(current['media_ai_rtp_ports_available'] == baseline['media_ai_rtp_ports_available'] - legs, f'expected exactly {legs} video port(s)')
         require(current['media_ai_ai_streams_active'] == 0, 'unexpected audio AI stream')
-        expected_streams = 2 if options.get('engine') else 2 * (int(options['segmentation']) + int(options['gesture']))
-        require(current[VIDEO + 'ai_streams_active'] == expected_streams, 'unexpected video source/task stream count')
+        # 1 dịch vụ ↔ 1 AI: mỗi leg đúng một stream (task direct hoặc source Engine).
+        require(current[VIDEO + 'ai_streams_active'] == legs, 'unexpected video source/task stream count')
         if artifact_io(run / 'engine-active.prom', 'exists'):
             engine = read_metrics(run / 'engine-active.prom')
-            require(engine['video_engine_sources_active'] == 2, 'expected one engine source per leg')
-            require(engine['video_engine_segmentation_active'] == 2 * int(options['segmentation']), 'wrong segmentation reservation count')
-            require(engine['video_engine_gesture_active'] == 2 * int(options['gesture']), 'wrong gesture reservation count')
+            require(engine['video_engine_sources_active'] == legs, 'expected one engine source per leg')
+            require(engine['video_engine_segmentation_active'] == legs * int(options['segmentation']), 'wrong segmentation reservation count')
+            require(engine['video_engine_gesture_active'] == legs * int(options['gesture']), 'wrong gesture reservation count')
         return 0
     counters = (VIDEO + 'pool_processed_total', VIDEO + 'frames_total', VIDEO + 'ai_frames_sent_total',
                 VIDEO + 'ai_results_received_total', 'media_ai_dispatcher_sent_total')
@@ -851,18 +894,20 @@ def data_main(folder, action, *args):
         state = load('signaling.json')
         state['callbacks'] = [event for event in callback_events(run) if event.get('event') == 'callback']
         save('callbacks.json', state)
-        valid, counts = validate(state, run.name, options['infer_size'], options['minimum'], options['duration'], options['gesture'], options['segmentation'], options['strict_mock'])
+        valid, counts = validate(state, run.name, options['infer_size'], options['minimum'], options['duration'], options['legs'], options['gesture'], options['segmentation'], options['strict_mock'])
         packets = sum(sender['packets'] for sender in load('senders.json').values())
         amounts = {key: delta(current, baseline, key) for key in counters}
-        gesture_counts = {'tCore': 0, 'tAccess': 0}
+        mf_to_session = {mf_leg: session_leg for session_leg, mf_leg in options['legs']}
+        gesture_counts = {mf_leg: 0 for mf_leg in mf_to_session}
         if options['gesture']:
             for body in state['callbacks']:
                 if body.get('kind') != 'video_gesture':
                     continue
                 leg = body['path'].rsplit('/', 1)[1]
+                session_leg = mf_to_session[leg]
                 require(body['event_type'] == 'video.gesture.result' and body['protocol'] == 'HTTP/2.0', 'invalid gesture callback type/protocol')
-                require(body['session_id'] == f'{run.name}-{leg.lower()}' and body['stream_id'] == f'{run.name}:{leg.lower()}:video', 'gesture crossed leg/session')
-                require(body['mediaResources'] == {leg: {'contextId': f'ctx-{leg}', 'terminationId': f'term-{leg}'}}, 'gesture resource mismatch')
+                require(body['session_id'] == f'{run.name}-{session_leg}' and body['stream_id'] == f'{run.name}:{session_leg}:video', 'gesture crossed leg/session')
+                require(body['mediaResources'] == leg_resources(options['legs'], leg), 'gesture resource mismatch')
                 g = body['gesture_result']
                 require(g['status'] == 'ok' and len(g['hands']) <= 4, 'invalid gesture snapshot')
                 gesture_counts[leg] += 1

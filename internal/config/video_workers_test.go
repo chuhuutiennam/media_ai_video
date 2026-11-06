@@ -70,7 +70,7 @@ video:
 		registry.Register(worker)
 	}
 	for task, expected := range map[string]string{"video_segment": "segmentation:50051", "gesture_recognition": "gesture:50052"} {
-		worker, err := registry.SelectVideoTask(task, "jpeg", "video_segment")
+		worker, err := registry.SelectVideoTask("change_background", task, "jpeg", "video_segment")
 		if err != nil || worker.Addr != expected {
 			t.Fatalf("wrong route for %s: %+v, %v", task, worker, err)
 		}

@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"media-ai-gateway/internal/mockai"
 	"media-ai-gateway/internal/pipeline"
-	"media-ai-gateway/workers/mockai"
 )
 
 func newJPEGTestPool(t *testing.T) *SharedConnPool {
@@ -89,7 +89,7 @@ func TestGestureTaskRoundTripAndGracefulDrain(t *testing.T) {
 	if snapshots[0].Hands[0].Center[0] == snapshots[1].Hands[0].Center[0] {
 		t.Fatal("position snapshots did not update")
 	}
-	if _, err := registry.SelectVideoTask("gesture_recognition", "jpeg", "video_segment"); err != nil {
+	if _, err := registry.SelectVideoTask("gesture_recognition", "gesture_recognition", "jpeg", "video_segment"); err != nil {
 		t.Fatal("slot not released after EOF", err)
 	}
 	registry.ReleaseVideoTask("video")
@@ -99,7 +99,7 @@ func TestVideoRouterRejectsWildcardAndWrongFormat(t *testing.T) {
 	r := NewWorkerRegistry(0)
 	r.Register(WorkerInfo{ID: "wildcard", Addr: "audio"})
 	r.Register(WorkerInfo{ID: "raw-only", Tasks: []string{"gesture_recognition"}, MediaTypes: []string{"video"}, InputFormats: []string{"RGB24"}, Protocols: []string{"video_segment"}})
-	if _, err := r.SelectVideoTask("gesture_recognition", "jpeg", "video_segment"); err == nil {
+	if _, err := r.SelectVideoTask("gesture_recognition", "gesture_recognition", "jpeg", "video_segment"); err == nil {
 		t.Fatal("selected incompatible engine")
 	}
 }

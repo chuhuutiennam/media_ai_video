@@ -85,7 +85,10 @@ def validate(run, assets):
     segmentation = result.get('segmentation_enabled', True)
     scripted = result.get('gesture_mode', 'mock') == 'mock'
     require_reaction = result.get('require_gesture', False)
-    for leg in ('tCore', 'tAccess'):
+    # MF legs của bài test (theo output đã ghi): dịch vụ 1 leg chỉ có tAccess, 2 leg có tCore + tAccess.
+    legs = list(result['output_videos'])
+    require(legs, 'no MF leg output recorded')
+    for leg in legs:
         folder = run / 'output' / leg.lower()
         frames = load(folder / 'frames.json')
         mapping = load(folder / 'render.json')
@@ -197,7 +200,7 @@ def validate(run, assets):
                            pixel_sample=row['file'], changed_pixels=changed, pixels_verified=True, reaction_rendered=any(r['stickers'] for r in mapping), segmentation_enabled=segmentation,
                            source_preserved=not segmentation,
                            emoji_keys=sorted({s['emoji_key'] for r in mapping for s in r['stickers']}))
-    require(len(epochs) == 2, 'two legs share recognizer state')
+    require(len(epochs) == len(legs), 'legs share recognizer state')
     result['gesture_validation'] = report
     (run / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
     print('Gesture timeline and exact RGBA pixels: PASS', json.dumps(report))

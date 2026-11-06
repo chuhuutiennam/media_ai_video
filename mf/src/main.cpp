@@ -31,14 +31,23 @@ int main(int argc, char** argv) {
                 continue;
             }
             if(option=="--gesture-only") { require_masks=false;continue; }
+            if (option == "--legs") {
+                if (++i == argc) throw std::runtime_error("missing value for " + option);
+                const std::string legs = argv[i];
+                if (legs != "1" && legs != "2") throw std::runtime_error("invalid --legs (1|2)");
+                playout.legs = legs == "1" ? 1 : 2;
+                continue;
+            }
             if (option == "--help" || option == "-h") {
                 std::cout << "Usage: mf_cpp --call-id ID [--port PORT]\n"
                              "       [--frames-root DIR --background IMAGE] [--events FILE]\n"
-                             "       [--emoji-dir DIR] [--gesture-only]\n"
+                             "       [--emoji-dir DIR] [--gesture-only] [--legs 1|2]\n"
                              "       [--playout-delay-ms 300 --mask-max-age-ms 500 --gesture-max-age-ms 500]\n"
                              "       [--gesture-render-mode realtime|arrival|source]\n"
                              "       [--result-capacity 4096 --recording-capacity 32]\n"
                              "POST /start/{tCore,tAccess} before RTP. ACK results without rendering.\n"
+                             "--legs: legs that must render before /finalize (default 2; 1 for single-leg services:\n"
+                             "        one gateway session <call>-tcore whose results arrive on the routed MF leg).\n"
                              "Realtime output frames are immutable and recorded once.\n"
                              "Features: raw-capture deferred-source-png gesture-render-modes\n";
                 return 0;

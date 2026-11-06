@@ -1,0 +1,66 @@
+# Danh mục dịch vụ video: mỗi selectedService ↔ đúng một AI service riêng.
+# Xem docs/giai-phap-video-service-catalog.md.
+#   change_background → repo mediapipe (segmentation) :50052
+#   video_effects     → repo gesture (gesture)        :50053
+# Lab không có AI thật: dùng 2 tiến trình mock-ai-worker trên 2 cổng này.
+# Không được kết hợp video.services với video.ai.workers / grpc_target / engine_target / video.gesture.enabled.
+gateway:
+  id: gw-video-services
+  raw_rtp_enabled: true
+  webrtc_enabled: false
+  mock_result_pump: false
+server:
+  http_addr: '127.0.0.1:8081'
+  public_url: 'http://127.0.0.1:8081'
+rtp:
+  listen_addr: '127.0.0.1:5006'
+  bind_ip: '127.0.0.1'
+  public_ip: '127.0.0.1'
+  port_start: 41000
+  port_end: 41099
+session:
+  max_sessions: 20
+  idle_timeout_sec: 600
+  per_session_packet_queue: 1024
+pipeline:
+  jitter_out_queue_size: 1024
+ai:
+  grpc_target: ''
+  watch_reconnect: true           # nối lại ngay khi AI của dịch vụ restart
+  reconnect_max_backoff_ms: 5000  # AI sống lại → gateway nối lại trong <= ~5s
+video:
+  enabled: true
+  worker_count: 2
+  job_queue_size: 1024
+  infer_width: 256
+  infer_height: 256
+  infer_fps: 5
+  frame_queue_size: 8
+  jpeg_quality: 80
+  default_effect_type: bg_replace
+  gesture:                        # thông số model gesture; dịch vụ video_effects khai báo ở video.services
+    infer_fps: 15
+    max_dimension: 640
+    max_hands: 4
+    frame_queue_size: 8
+  ai:
+    max_active_streams: 40        # giới hạn mặc định mỗi target khi services.*.ai.max_streams = 0
+    max_retry: 0
+  services:
+    change_background:
+      enabled: true
+      legs: tcore                 # tcore (mặc định) | both
+      effect_type: bg_replace
+      ai:
+        task: video_segment       # AI segmentation (repo mediapipe)
+        targets: ['127.0.0.1:50052']
+        max_streams: 8
+    video_effects:
+      enabled: true
+      legs: tcore
+      ai:
+        task: gesture_recognition # AI gesture (repo gesture), khác AI của change_background
+        targets: ['127.0.0.1:50053']
+        max_streams: 4
+log:
+  level: debug

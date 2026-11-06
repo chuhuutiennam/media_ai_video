@@ -86,9 +86,12 @@ type ServerConfig struct {
 	// WebRTCEnabled bật/tắt WebRTC ingress. false → POST /v1/webrtc/offer trả 404.
 	WebRTCEnabled bool
 
-	// VideoEnabled bật/tắt xử lý video khi DCSF gửi bearerCapability: VIDEO.
-	// false → handleAnswer bỏ qua BearerCapability, chạy audio-only như cũ
+	// VideoEnabled bật/tắt xử lý video. false → dịch vụ video trả 400.
 	VideoEnabled bool
+
+	// VideoServices là danh mục dịch vụ video (key chữ thường = selectedService),
+	// mỗi dịch vụ đúng một AI task. Nguồn: video.services hoặc DefaultVideoServices.
+	VideoServices map[string]VideoService
 
 	// WebRTC configures the WebRTC ingress (Pion PeerConnection, ICE servers, NAT).
 	// Used to handle POST /v1/webrtc/offer.
@@ -106,10 +109,11 @@ type ServerConfig struct {
 // DefaultServerConfig trả về cấu hình mặc định (h2c, port 8080).
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
-		Addr:         ":8080",
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:          ":8080",
+		ReadTimeout:   10 * time.Second,
+		WriteTimeout:  10 * time.Second,
+		IdleTimeout:   60 * time.Second,
+		VideoServices: DefaultVideoServices(true),
 	}
 }
 
@@ -131,14 +135,21 @@ type Server struct {
 	inner      *http.Server
 
 	// Optional metric sources — set after construction via setter methods.
-	ingress       *rawrtp.Ingress
-	cbMu          sync.Mutex
-	httpCallbacks []*result.HTTPCallbackSink
+	ingress *rawrtp.Ingress
+	// httpCallbacks giữ sink của session còn mở; khi session đóng, sink bị gỡ và
+	// số retry của nó cộng vào retiredCallbackRetries (metric vẫn là tổng tích lũy).
+	cbMu                   sync.Mutex
+	httpCallbacks          map[*session.Session][]*result.HTTPCallbackSink
+	retiredCallbackRetries uint64
 
 	// Optional connection sources — set after construction via setter methods.
 	grpcPool       *ai.SharedConnPool
 	callbackClient *result.CallbackHTTPClient
 	dcsfPool       *DCSFPool
+
+	// videoRegistry: registry chọn worker video theo (dịch vụ, task); nil = không kiểm tra
+	// AI theo dịch vụ khi ANSWER (Engine hoặc không có worker video).
+	videoRegistry *ai.WorkerRegistry
 
 	videoIngress rawrtp.VideoIngressCounters
 }
@@ -159,13 +170,51 @@ func (s *Server) SetVideoMetrics(pool *pipeline.VideoWorkerPool, manager *ai.Vid
 	s.videoPool, s.videoAI = pool, manager
 }
 
-// RegisterCallbackSink đăng ký HTTPCallbackSink để expose callback_retry_total tại /metrics.
+// RegisterCallbackSink đăng ký HTTPCallbackSink của sess để expose callback_retry_total
+// tại /metrics. Khi sess đóng, sink được gỡ để danh sách không tăng theo số cuộc gọi.
 // Goroutine-safe: được gọi từ HTTP handler goroutines đồng thời.
-func (s *Server) RegisterCallbackSink(sink *result.HTTPCallbackSink) {
+func (s *Server) RegisterCallbackSink(sess *session.Session, sink *result.HTTPCallbackSink) {
 	s.cbMu.Lock()
-	s.httpCallbacks = append(s.httpCallbacks, sink)
-	s.cbMu.Unlock()
+	defer s.cbMu.Unlock()
+	if s.httpCallbacks == nil {
+		s.httpCallbacks = make(map[*session.Session][]*result.HTTPCallbackSink)
+	}
+	_, watched := s.httpCallbacks[sess]
+	s.httpCallbacks[sess] = append(s.httpCallbacks[sess], sink)
+	if !watched {
+		go func() {
+			<-sess.Ctx.Done()
+			s.retireCallbackSinks(sess)
+		}()
+	}
 }
+
+// retireCallbackSinks gỡ sink của session đã đóng, giữ lại số retry của chúng.
+func (s *Server) retireCallbackSinks(sess *session.Session) {
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
+	for _, sink := range s.httpCallbacks[sess] {
+		s.retiredCallbackRetries += sink.Retries()
+	}
+	delete(s.httpCallbacks, sess)
+}
+
+// callbackRetries trả về tổng retry của mọi sink từng đăng ký (cả session đã đóng).
+func (s *Server) callbackRetries() uint64 {
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
+	total := s.retiredCallbackRetries
+	for _, sinks := range s.httpCallbacks {
+		for _, sink := range sinks {
+			total += sink.Retries()
+		}
+	}
+	return total
+}
+
+// SetVideoWorkerRegistry bật kiểm tra AI theo dịch vụ khi ANSWER: dịch vụ video không còn
+// worker phục vụ (dịch vụ, task) với slot trống → 503. Chỉ gọi khi video dial qua registry.
+func (s *Server) SetVideoWorkerRegistry(r *ai.WorkerRegistry) { s.videoRegistry = r }
 
 // SetGRPCPool wires SharedConnPool để expose trạng thái kết nối AI tại GET /v1/connections.
 func (s *Server) SetGRPCPool(pool *ai.SharedConnPool) { s.grpcPool = pool }

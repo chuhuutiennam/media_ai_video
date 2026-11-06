@@ -1514,13 +1514,19 @@ Callback kết quả transcript về backend/call service.
 
 ### Lifecycle & metrics registration
 
-`Coordinator.Start()` tạo `*HTTPCallbackSink` nếu `sess.CallbackURL != ""` và trả nó về cùng với `error`. Handler `createSession` gọi `server.RegisterCallbackSink(sink)` để sink được tính vào `callback_retry_total` tại `/metrics`. Nếu `callback_url` không cung cấp, sink là `nil` và không cần đăng ký.
+`Coordinator.Start()` tạo `*HTTPCallbackSink` nếu `sess.CallbackURL != ""` và trả nó về cùng với `error`. Handler ANSWER (và ctrl-result khi đổi callback URL) gọi `server.RegisterCallbackSink(sess, sink)` để sink được tính vào `callback_retry_total` tại `/metrics`. Nếu `callback_url` không cung cấp, sink là `nil` và không cần đăng ký.
+
+Sink được gắn với session. Khi session đóng (`sess.Ctx` done), server gỡ sink và cộng số retry
+của nó vào một tổng riêng, nên danh sách sink không tăng theo số cuộc gọi mà metric vẫn là tổng
+tích lũy.
 
 ```
 coord.Start(sess)
   → *HTTPCallbackSink (hoặc nil)
-  → server.RegisterCallbackSink(sink)   // chỉ khi != nil
-  → /metrics: callback_retry_total += sink.Retries()
+  → server.RegisterCallbackSink(sess, sink)   // chỉ khi != nil
+  → /metrics: callback_retry_total = retry đã gỡ + Σ sink.Retries() của session còn mở
+sess.Ctx done
+  → gỡ sink của sess, cộng sink.Retries() vào retry đã gỡ
 ```
 
 ### Request mẫu
@@ -1668,8 +1674,8 @@ result_partial_total
 result_final_total
 result_dispatch_errors_total
 result_queue_dropped_total
-callback_retry_total        ← tổng retry của tất cả HTTPCallbackSink đã đăng ký;
-                               chỉ khác 0 khi session được tạo với callback_url
+callback_retry_total        ← tổng retry của tất cả HTTPCallbackSink từng đăng ký (kể cả
+                               session đã đóng); chỉ khác 0 khi session được tạo với callback_url
 ```
 
 ### Metrics System

@@ -12,8 +12,8 @@ DCSF                                    DCAS (media-ai-gateway)
   │── POST notify-event {BEGIN} ───────────────>│
   │<─ 200 OK {} ────────────────────────────────│
   │                                              │
-  │── POST notify-event {ANSWER} ──────────────>│  [tạo 2 session + cấp RTP port]
-  │<─ 200 OK {tcore_rtp_port, taccess_rtp_port} │
+  │── POST notify-event {ANSWER} ──────────────>│  [tạo session theo leg + cấp RTP port]
+  │<─ 201 Created {rtp_ip, *_rtp_port, ...} ────│
   │                                              │
   │<── POST call-control {duplicate} ───────────│  [gửi async sau khi flush response]
   │─── 200 OK ─────────────────────────────────>│
@@ -81,7 +81,16 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 
 **Endpoint:** `POST /v1/vonras/call-sessions/{callId}/notify-event`
 
-**Mô tả:** DCSF thông báo cuộc gọi đã được trả lời và cung cấp dịch vụ AI cần xử lý. DCAS tạo 2 session nội bộ (`{callId}-tcore` và `{callId}-taccess`), cấp phát 2 RTP port, khởi động pipeline AI, rồi trả về thông tin RTP endpoint.
+**Mô tả:** DCSF thông báo cuộc gọi đã được trả lời và cung cấp dịch vụ AI cần xử lý. DCAS tạo session nội bộ theo dịch vụ, cấp RTP port, khởi động pipeline AI, rồi trả về thông tin RTP endpoint (HTTP **201**):
+
+- Dịch vụ audio: 2 session `{callId}-tcore` và `{callId}-taccess`, mỗi session 1 port audio.
+- Dịch vụ video: theo `legs` của danh mục `video.services`. Mặc định (`tcore`) chỉ có session
+  `{callId}-tcore` với 1 port video; `legs: both` thêm `{callId}-taccess`.
+
+Thứ tự kiểm tra trước khi tạo session: tra `selectedService` (không phân biệt hoa thường) →
+kiểm tra tải gateway → điều kiện riêng của video (`video.enabled`, dải port, AI của dịch vụ còn
+slot). Lỗi xảy ra sau khi đã tạo session thì DCAS đóng các session đó và trả port trước khi
+trả lỗi.
 
 ### Request body
 
@@ -103,14 +112,14 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 
 | Field | Type | Mô tả |
 |---|---|---|
-| `callId` | string | ID cuộc gọi |
+| `callId` | string | ID cuộc gọi. DCAS dùng `{callId}` trên URL, không so với giá trị trong body |
 | `event` | string | `"ANSWER"` |
-| `selectedService` | string | `"speech_to_text"` \| `"realtime_translation"` — xác định codec và task AI |
+| `selectedService` | string | Dịch vụ audio `"speech_to_text"` \| `"realtime_translation"`, hoặc dịch vụ video trong danh mục `video.services` (mặc định `"change_background"`, `"video_effects"`) — xác định media và AI |
 | `direction` | string | `"MO"` \| `"MT"` |
 | `role` | string | `"originator"` \| `"terminator"` |
 | `dcasId` | string | Định danh DCAS module: `"dcas_stt"` \| `"dcas_rt"` \| `"dcas_fc"` \| `"dcas_vvc"` |
 | `callbackKey` | string | Random 16-char hex — DCSF dùng để route CALL_CTRL vào đúng Erlang process |
-| `callbackUrl` | string | URL DCAS POST CALL_CTRL về DCSF; format: `.../call-control/{dcasId}/{callbackKey}` |
+| `callbackUrl` | string | URL DCAS POST CALL_CTRL về DCSF; format: `.../call-control/{dcasId}/{callbackKey}`. Bỏ trống → DCAS không gửi CALL_CTRL |
 
 **Mapping `selectedService` → codec:**
 
@@ -120,12 +129,27 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 | `realtime_translation` | PCMU | 8000 Hz | `realtime_translation` |
 | *(khác)* | — | — | ACK 200 `{}`, không tạo session |
 
+Dịch vụ audio không mở video kể cả khi `bearerCapability: VIDEO`.
+
+**Mapping `selectedService` video** (danh mục `video.services`, mỗi dịch vụ **đúng một AI
+service** — xem [giai-phap-video-service-catalog.md](giai-phap-video-service-catalog.md)):
+
+| selectedService (mặc định) | Media | Leg | AI task |
+|---|---|---|---|
+| `change_background` | H264/90000 | chỉ tcore; kết quả về `callbackUrl` tAccess của ctrl-result | `video_segment` (repo AI mediapipe) |
+| `video_effects` | H264/90000 | chỉ tcore; kết quả về `callbackUrl` tAccess của ctrl-result | `gesture_recognition` (repo AI gesture) |
+| dịch vụ khai báo thêm trong `video.services` | H264/90000 | theo `legs` (mặc định `tcore`) | theo `ai.task` |
+| dịch vụ tắt (`enabled: false`) | — | — | ACK 200 `{}`, không tạo session |
+| AI của dịch vụ hết slot / không có worker riêng | — | — | HTTP 503 `no AI worker available for service <tên>` |
+
 ### Response
+
+`HTTP/1.1 201 Created`. Dịch vụ audio:
 
 ```json
 {
   "session_id": "call-abc123",
-  "status": "active",
+  "status": "CREATED",
   "source_type": "raw_rtp",
   "codec": "PCMU",
   "sample_rate": 8000,
@@ -166,16 +190,50 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 | `tcore_local_non_dc_media` | SDP mô tả RTP endpoint của DCAS cho tCore stream; DCAS dùng làm `remoteNonDcMedia` khi gọi MF MRM API |
 | `taccess_local_non_dc_media` | SDP mô tả RTP endpoint của DCAS cho tAccess stream |
 
+Dịch vụ video 1 leg (mặc định, ví dụ `video_effects`). Không có field audio (`codec`,
+`sample_rate`, `*_rtp_port` audio):
+
+```json
+{
+  "session_id": "call-abc123",
+  "status": "CREATED",
+  "source_type": "raw_rtp",
+  "channels": 1,
+  "task": "video_effects",
+  "created_at": "2026-11-06T04:46:17.409384609Z",
+  "gateway_id": "gw-ims-01",
+  "rtp_ip": "10.0.1.5",
+  "tcore_video_rtp_port": 38740,
+  "tcore_local_non_dc_video_media": {
+    "sdpmLine": "video 38740 RTP/AVP 96",
+    "sdpaLines": [
+      "rtpmap:96 H264/90000",
+      "fmtp:96 packetization-mode=1;profile-level-id=42e01f",
+      "sendrecv"
+    ]
+  }
+}
+```
+
+| Field | Mô tả |
+|---|---|
+| `tcore_video_rtp_port` | UDP port nhận RTP video H264 của leg tcore |
+| `tcore_local_non_dc_video_media` | SDP video của DCAS cho leg tcore |
+| `taccess_video_rtp_port`, `taccess_local_non_dc_video_media` | Chỉ có với dịch vụ `legs: both` |
+
+`status` là `CREATED` khi trả ANSWER; session chuyển `ACTIVE` khi nhận gói RTP đầu tiên.
+
 **Lưu ý:** Response được flush ngay trước khi DCAS gửi CALL_CTRL (bước tiếp theo). DCSF không cần chờ CALL_CTRL để xử lý response ANSWER.
 
-**Lỗi:**
+**Lỗi** (body `{"error": "...", "retry_after_ms": N}`; `retry_after_ms` chỉ có ở một số lỗi 503):
 
 | HTTP | Nguyên nhân |
 |---|---|
-| `400` | JSON không hợp lệ hoặc event không nhận dạng được |
+| `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`) |
 | `409` | `callId` đã tồn tại trong session manager |
-| `503` | Không đủ RTP port hoặc gateway đạt giới hạn session |
-| `500` | Lỗi khởi động RTP listener hoặc pipeline |
+| `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot (`no AI worker available for service <tên>`) |
+| `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`) |
+| `500` | Lỗi mở RTP listener hoặc lỗi tạo session khác |
 
 ---
 
@@ -187,7 +245,7 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 
 **Mô tả:** Sau khi flush response ANSWER, DCAS gửi CALL_CTRL bất đồng bộ (goroutine riêng) để yêu cầu DCSF thiết lập tài nguyên H.248 trên Media Function (MF). DCAS yêu cầu action `"duplicate"` để MF tạo context với 2 termination (tCore + tAccess) và duplicate RTP stream về DCAS endpoint.
 
-**Thời điểm gửi:** Ngay sau khi `c.Writer.Flush()` trả về trong handler ANSWER. Timeout mặc định 30s (cấu hình qua `dcsf.call_control_timeout_ms`).
+**Thời điểm gửi:** Ngay sau khi `c.Writer.Flush()` trả về trong handler ANSWER. Timeout mặc định 30s (cấu hình qua `dcsf.call_control_timeout_ms`). Chỉ gửi khi ANSWER có `callbackUrl`; nếu không, session vẫn mở tới khi có DELETE hoặc hết `session.idle_timeout_sec` không nhận gói RTP.
 
 ### Request body
 
@@ -213,7 +271,7 @@ DCAS không xử lý gì thêm với BEGIN. Không có action nội bộ.
 HTTP/1.1 200 OK
 ```
 
-Bất kỳ status nào ngoài 2xx → DCAS log warning và đóng cả 2 session (`{callId}-tcore` + `{callId}-taccess`).
+Bất kỳ status nào ngoài 2xx (hoặc timeout) → DCAS log warning và đóng các session của cuộc gọi (`{callId}-tcore`, và `{callId}-taccess` nếu có).
 
 **Lỗi từ DCSF:**
 
@@ -274,13 +332,18 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
 - Cập nhật `session.CallbackURL` cho cả `{callId}-tcore` và `{callId}-taccess`
 - Cập nhật `session.MediaResources` (contextId + terminationId) để attach vào ASR result
 - Đăng ký/cập nhật HTTP callback sink cho từng session
+- Dịch vụ video 1 leg (`legs: tcore`, mặc định `change_background`, `video_effects`): chỉ có
+  session `{callId}-tcore`. Session này nhận `callbackUrl` của **tAccess** và
+  `mediaResources` của cả tCore lẫn tAccess. `callbackUrls` (URL riêng theo task, xem
+  [luong-xu-ly-video-realtime-rtpgw-ai-mf.md](luong-xu-ly-video-realtime-rtpgw-ai-mf.md))
+  vẫn lấy từ **tCore**; `callbackUrls` đặt trong tAccess bị bỏ qua.
 
 ### Response
 
 ```json
 {
   "session_id": "call-abc123",
-  "status": "active",
+  "status": "ACTIVE",
   "source_type": "raw_rtp",
   "codec": "PCMU",
   "sample_rate": 8000,
@@ -289,6 +352,8 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
   "created_at": "2026-08-10T10:00:00.000000+07:00"
 }
 ```
+
+`status` là `CREATED` nếu session chưa nhận gói RTP nào.
 
 **Lưu ý:** Response dùng thông tin của session `{callId}-taccess` (subscriber side). Nếu taccess không tồn tại thì fallback sang `{callId}-tcore`.
 
@@ -305,13 +370,15 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
 
 ```
 BEGIN           → Không tạo session
-ANSWER          → Tạo {callId}-tcore + {callId}-taccess (status: active)
-CALL_CONTROL    → DCAS → DCSF (async)
+ANSWER          → Tạo {callId}-tcore (+ {callId}-taccess với audio hoặc video legs: both), status CREATED
+RTP đầu tiên    → status ACTIVE
+CALL_CONTROL    → DCAS → DCSF (async, chỉ khi ANSWER có callbackUrl)
 CTRL_RESULT     → Cập nhật callback URL + termination ID
-DELETE          → Đóng cả 2 session: DELETE /v1/vonras/call-sessions/{callId}
+DELETE          → Đóng mọi session của cuộc gọi: DELETE /v1/vonras/call-sessions/{callId}
+Idle            → Không nhận gói RTP quá session.idle_timeout_sec → DCAS tự đóng session
 ```
 
-Nếu CALL_CTRL thất bại (non-2xx hoặc timeout), DCAS tự đóng cả 2 session mà không chờ DCSF.
+Nếu CALL_CTRL thất bại (non-2xx hoặc timeout), DCAS tự đóng các session của cuộc gọi mà không chờ DCSF.
 
 ---
 

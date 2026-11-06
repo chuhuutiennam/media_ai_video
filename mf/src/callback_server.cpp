@@ -96,7 +96,7 @@ struct Service {
 
     json status() const {
         json legs = json::object();
-        bool done = finalized && renderers.size() == 2;
+        bool done = finalized && renderers.size() == playout.legs;
         size_t failures = errors;
         for (const auto& item : renderers) {
             legs[item.first] = item.second->status();
@@ -129,8 +129,9 @@ struct Service {
         if (method == "POST" && path == "/finalize") {
             if (frames_root.empty()) return {404, {{"error", "render mode is disabled"}}};
             try {
-                if (renderers.size() != 2 || errors)
-                    return {409, {{"error", "finalize requires two rendered legs and zero callback errors"}}};
+                if (renderers.size() != playout.legs || errors)
+                    return {409, {{"error", "finalize requires " + std::to_string(playout.legs) +
+                                            " rendered leg(s) and zero callback errors"}}};
                 for (auto& item : renderers) item.second->finish();
                 finalized = true;
                 emit({{"event", "input_sealed"}, {"status", status()}});
@@ -149,12 +150,15 @@ struct Service {
         json callback;
         try {
             callback = json::parse(body);
-            const std::string session = call_id + "-" + suffix;
+            // Dịch vụ 1 leg (--legs 1): gateway chỉ có session tcore; ctrl-result single-leg gửi
+            // kết quả của nó về callback của leg kia (thường tAccess), kèm resource của cả hai leg.
+            const std::string session_suffix = playout.legs == 1 ? "tcore" : suffix;
+            const std::string session = call_id + "-" + session_suffix;
             const bool gesture=callback.value("event_type","")=="video.gesture.result" && callback.value("kind","")=="video_gesture";
             const bool mask=callback.value("event_type","")=="video.mask.result" && callback.value("kind","")=="video_mask";
             if ((!mask && !gesture) || callback.at("session_id")!=session ||
                 (mask && (callback.at("is_final")!=true || callback.at("stream_id")!=session)) ||
-                (gesture && (callback.at("stream_id")!=call_id+":"+suffix+":video" || callback.value("ai_service","")!="gesture_recognition")))
+                (gesture && (callback.at("stream_id")!=call_id+":"+session_suffix+":video" || callback.value("ai_service","")!="gesture_recognition")))
                 throw std::runtime_error("invalid callback identity/event");
             const auto& resource = callback.at("mediaResources").at(leg);
             if (!resource.at("contextId").is_string() || resource.at("contextId").get<std::string>().empty() ||

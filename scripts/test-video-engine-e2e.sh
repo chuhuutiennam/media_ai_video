@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 PYTHON_BIN=${PYTHON:-python3}
 PARENT=${TMPDIR:-/tmp}
-SEGMENTATION_TARGET= GESTURE_TARGET= MODE=both
+SEGMENTATION_TARGET= GESTURE_TARGET= MODE=segmentation
 RUN_DIR= ENGINE_PID= PREBUILT=
 ARGS=()
 while (( $# )); do
@@ -14,12 +14,12 @@ while (( $# )); do
 Usage: bash scripts/test-video-engine-e2e.sh [options]
   --segmentation-target HOST:PORT  Existing model worker; default starts a mock
   --gesture-target HOST:PORT       Existing model worker; default starts a mock
-  --segmentation-only              Enable segmentation only
-  --gesture-only                   Enable gesture only
+  --segmentation-only              Run change_background: segmentation only, one leg (default)
+  --gesture-only                   Run video_effects: gesture only, one leg
   --artifacts-dir DIR              Parent for engine and full media artifacts
   --bin-dir DIR                    Reuse engine/gateway/mock/sender/MF binaries
 All other test-video-e2e.sh options (duration/input/PCAP/background/etc.) pass through.
-Default: both tasks, mock workers, 3 seconds, PNG/MP4 and gesture pixel validation.
+Default: change_background, mock workers, 3 seconds, PNG/MP4. One service uses one AI: no combined mode.
 HELP
       exit 0 ;;
     --segmentation-target|--gesture-target|--artifacts-dir|--bin-dir)
@@ -99,7 +99,6 @@ TASK_ARGS=(--gesture-mode "$GEST_MODE")
 case "$MODE" in
   segmentation) TASK_ARGS=(--gesture-mode off);;
   gesture) TASK_ARGS+=(--gesture-only --require-gesture);;
-  both) TASK_ARGS+=(--require-gesture);;
 esac
 VIDEO_ENGINE_TARGET="$ENGINE_TARGET" VIDEO_ENGINE_METRICS="$ENGINE_METRICS" \
   bash scripts/test-video-e2e.sh --bin-dir "$PREBUILT" --artifacts-dir "$RUN_DIR" \

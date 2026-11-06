@@ -88,11 +88,12 @@ func (d *VideoRoutingDialer) Dial(ctx context.Context, sessionID, streamID strin
 			task = "video_segment"
 		}
 	}
-	worker, err := d.registry.SelectVideoTask(task, "jpeg", "video_segment")
+	service := streamCfg.SelectedService
+	worker, err := d.registry.SelectVideoTask(service, task, "jpeg", "video_segment")
 	if err != nil {
-		return nil, fmt.Errorf("ai: route video/%s: %w", task, err)
+		return nil, fmt.Errorf("ai: route video %s/%s: %w", service, task, err)
 	}
-	zap.L().Debug("ai: dialing video worker", zap.String("session_id", sessionID),
+	zap.L().Debug("ai: dialing video worker", zap.String("session_id", sessionID), zap.String("service", service),
 		zap.String("task", task), zap.String("worker_id", worker.ID), zap.String("worker_addr", worker.Addr))
 	client, err := d.dialFn(ctx, worker.Addr, sessionID, streamID, streamCfg)
 	if err != nil {

@@ -30,7 +30,7 @@ func TestStartGestureOnlyOpensOneTaskWithoutMaskFrames(t *testing.T) {
 	dialer := &gestureOnlyDialer{configs: make(chan ai.VideoStreamConfig, 4)}
 	coord.videoAI = ai.NewVideoManager(ai.Config{MaxActiveStreams: 4, StreamTimeout: 30 * time.Second}, dialer)
 	mgr := newVideoMgr()
-	sess, err := mgr.Create(session.SessionConfig{ID: "gesture-only-tcore", Task: "gesture_recognition", VideoEnabled: true})
+	sess, err := mgr.Create(session.SessionConfig{ID: "gesture-only-tcore", Task: "video_effects", VideoEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestStartGestureOnlyOpensOneTaskWithoutMaskFrames(t *testing.T) {
 		t.Fatal("gesture-only opened more than one AI task")
 	}
 	cfg := <-dialer.configs
-	if cfg.AIService != "gesture_recognition" || cfg.SelectedService != "gesture_recognition" || cfg.EffectType != "" {
+	if cfg.AIService != "gesture_recognition" || cfg.SelectedService != "video_effects" || cfg.EffectType != "" {
 		t.Fatalf("wrong gesture-only task: %+v", cfg)
 	}
 	for _, packet := range genShortH264Packets(t, sess.ID) {
@@ -64,10 +64,41 @@ func TestStartGestureOnlyOpensOneTaskWithoutMaskFrames(t *testing.T) {
 	}
 }
 
+// 1 dịch vụ ↔ 1 AI: change_background chỉ mở segmentation dù gesture đang bật
+// (trước đây mở thêm stream gesture ngay khi StartVideo).
+func TestStartChangeBackgroundOpensOnlySegmentation(t *testing.T) {
+	coord, _, _ := newVideoStack(t)
+	coord.cfg.GestureEnabled = true
+	coord.cfg.GestureFPS, coord.cfg.GestureMaxDimension = 15, 64
+	coord.cfg.GestureMaxHands, coord.cfg.GestureQueueSize = 4, 8
+	dialer := &gestureOnlyDialer{configs: make(chan ai.VideoStreamConfig, 4)}
+	coord.videoAI = ai.NewVideoManager(ai.Config{MaxActiveStreams: 4, StreamTimeout: 30 * time.Second}, dialer)
+	mgr := newVideoMgr()
+	sess, err := mgr.Create(session.SessionConfig{ID: "bg-only-tcore", Task: "change_background", VideoAITask: "video_segment",
+		EffectType: "bg_replace", VideoEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close(sess.ID)
+	if _, err := coord.Start(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := coord.StartVideo(sess); err != nil {
+		t.Fatal(err)
+	}
+	if len(dialer.configs) != 1 || coord.videoAI.Count() != 1 {
+		t.Fatalf("change_background opened %d AI streams, want 1", coord.videoAI.Count())
+	}
+	cfg := <-dialer.configs
+	if cfg.AIService != "" || cfg.SelectedService != "change_background" || cfg.EffectType != "bg_replace" {
+		t.Fatalf("wrong segmentation task: %+v", cfg)
+	}
+}
+
 func TestStartGestureOnlyRequiresFeatureEnabled(t *testing.T) {
 	coord, _, _ := newVideoStack(t)
 	mgr := newVideoMgr()
-	sess, err := mgr.Create(session.SessionConfig{ID: "gesture-disabled", Task: "gesture_recognition", VideoEnabled: true})
+	sess, err := mgr.Create(session.SessionConfig{ID: "gesture-disabled", Task: "video_effects", VideoEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,22 +108,32 @@ func TestStartGestureOnlyRequiresFeatureEnabled(t *testing.T) {
 	}
 }
 
-func TestStartEngineVideoOpensOneSourceWithEnabledTasks(t *testing.T) {
-	for _, mode := range []string{"both", "segmentation", "gesture"} {
-		t.Run(mode, func(t *testing.T) {
+// 1 dịch vụ ↔ 1 AI: source của Engine chỉ chứa đúng task của dịch vụ; change_background
+// không kèm gesture kể cả khi gesture được bật.
+func TestStartEngineVideoOpensOneSourceWithServiceTask(t *testing.T) {
+	for _, tc := range []struct {
+		name, service, task string
+		gestureEnabled      bool
+	}{
+		{"segmentation", "change_background", "video_segment", false},
+		{"segmentation_gesture_enabled", "change_background", "video_segment", true},
+		{"gesture", "video_effects", "gesture_recognition", true},
+	} {
+		mode := "segmentation"
+		if tc.task == "gesture_recognition" {
+			mode = "gesture"
+		}
+		t.Run(tc.name, func(t *testing.T) {
 			coord, _, _ := newVideoStack(t)
 			coord.cfg.VideoEngine, coord.cfg.VideoSourceMaxDimension = true, 64
 			coord.cfg.VideoInferWidth, coord.cfg.VideoInferHeight, coord.cfg.VideoInferFPS = 32, 32, 5
-			coord.cfg.GestureEnabled = mode != "segmentation"
+			coord.cfg.GestureEnabled = tc.gestureEnabled
 			coord.cfg.GestureFPS, coord.cfg.GestureMaxDimension, coord.cfg.GestureMaxHands = 15, 64, 2
 			dialer := &gestureOnlyDialer{configs: make(chan ai.VideoStreamConfig, 4)}
 			coord.videoAI = ai.NewVideoManager(ai.Config{MaxActiveStreams: 4}, dialer)
 			mgr := newVideoMgr()
-			service := "change_background"
-			if mode == "gesture" {
-				service = "gesture_recognition"
-			}
-			sess, err := mgr.Create(session.SessionConfig{ID: "source-tcore", Task: service, VideoEnabled: true})
+			service := tc.service
+			sess, err := mgr.Create(session.SessionConfig{ID: "source-tcore", Task: service, VideoAITask: tc.task, VideoEnabled: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -110,8 +151,8 @@ func TestStartEngineVideoOpensOneSourceWithEnabledTasks(t *testing.T) {
 			if cfg.Source == nil || cfg.MediaEpoch == "" || cfg.SelectedService != service {
 				t.Fatalf("invalid source open: %+v", cfg)
 			}
-			if (cfg.Source.Segmentation != nil) != (mode != "gesture") || (cfg.Source.Gesture != nil) != (mode != "segmentation") {
-				t.Fatal("wrong enabled task set")
+			if (cfg.Source.Segmentation != nil) != (mode == "segmentation") || (cfg.Source.Gesture != nil) != (mode == "gesture") {
+				t.Fatalf("wrong task set: segmentation=%v gesture=%v", cfg.Source.Segmentation != nil, cfg.Source.Gesture != nil)
 			}
 			fps := 15
 			if mode == "segmentation" {

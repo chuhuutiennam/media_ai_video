@@ -1,6 +1,0 @@
-recursive-include assets *.png *.md
-
-include src/proto/video.proto
-recursive-include scripts *.sh
-recursive-include etc *.yaml
-recursive-include docs *.md

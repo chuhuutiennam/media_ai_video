@@ -51,8 +51,11 @@ audio và không được phát RTP ngược vào cuộc gọi.
 Ví dụ khởi động receiver với các biến chỉ tới thư mục run đã chuẩn bị:
 
 ```bash
-./bin/mf_cpp --port 9999 --call-id example   --frames-root "$VIDEO_RUN/output" --background data/video/bg_image.jpg   --emoji-dir workers/gesture/assets/emoji   --events "$VIDEO_RUN/mf-events.jsonl"
+./bin/mf_cpp --port 9999 --call-id example   --frames-root "$VIDEO_RUN/output" --background data/video/bg_image.jpg   --emoji-dir ../gesture/assets/emoji   --events "$VIDEO_RUN/mf-events.jsonl"
 ```
+
+Ảnh emoji lấy từ repo AI gesture (`../gesture/assets/emoji`, script E2E dùng biến
+`GESTURE_DIR`). Dịch vụ 1 leg (`change_background`, `video_effects`) chạy thêm `--legs 1`.
 
 Receiver bind localhost. `/results/tCore` và `/results/tAccess` nhận callback đúng
 session/stream/resource từng leg. `GET /status` xem trạng thái;

@@ -47,29 +47,38 @@ func (s *Server) notifyEvent(c *gin.Context) {
 }
 
 // handleAnswer creates tcore/taccess sessions and allocates only the media
-// required by selectedService and bearerCapability.
+// required by selectedService: audio services (serviceProfiles) get audio,
+// video services (ServerConfig.VideoServices) get video with exactly one AI task.
 func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent) {
-	profile, supported := lookupServiceProfile(event.SelectedService)
-	if !supported {
-		// Service not yet handled (e.g. fun_calling) — acknowledge without creating session.
+	service := strings.ToLower(event.SelectedService)
+	profile, isAudio := lookupServiceProfile(service)
+	videoSvc, isVideo := s.cfg.VideoServices[service]
+	isVideo = isVideo && videoSvc.Enabled
+	if !isAudio && !isVideo {
+		// Service not handled or disabled (e.g. fun_calling) — acknowledge without creating session.
 		c.JSON(http.StatusOK, gin.H{})
 		return
 	}
-	singleLeg := profile.SingleLeg
+	singleLeg := isVideo && videoSvc.SingleLeg
 
 	if ok, retryMs := s.admission.Check(); !ok {
 		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "service at capacity, try again later", RetryAfterMs: retryMs})
 		return
 	}
 
-	audioEnabled := profile.NeedsAudio
-	videoEnabled := (profile.NeedsVideo || strings.EqualFold(event.BearerCapability, "VIDEO")) && s.cfg.VideoEnabled
+	// 1 dịch vụ ↔ 1 AI: dịch vụ audio không mở video kể cả khi bearerCapability=VIDEO.
+	audioEnabled := isAudio
+	videoEnabled := isVideo && s.cfg.VideoEnabled
 	if !audioEnabled && !videoEnabled {
 		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "service " + event.SelectedService + " requires video.enabled=true"})
 		return
 	}
 	if videoEnabled && s.portAlloc == nil {
 		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "video requires a per-session RTP port pool"})
+		return
+	}
+	if videoEnabled && s.videoRegistry != nil && !s.videoRegistry.HasVideoCapacity(service, videoSvc.AITask) {
+		c.JSON(http.StatusServiceUnavailable, ErrorResponse{Error: "no AI worker available for service " + service, RetryAfterMs: 3000})
 		return
 	}
 	tcoreID := callID + "-tcore"
@@ -82,7 +91,10 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 
 		VideoEnabled: videoEnabled,
 		VideoCodec:   "H264",
-		EffectType:   profile.EffectType,
+	}
+	if videoEnabled {
+		baseCfg.VideoAITask = videoSvc.AITask
+		baseCfg.EffectType = videoSvc.EffectType
 	}
 	if audioEnabled {
 		baseCfg.Codec = profile.Codec
@@ -181,20 +193,20 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 
 	cbSink1, err := s.coord.Start(sessTCore)
 	if err != nil {
-		rollback(http.StatusBadRequest, "pipeline: "+err.Error())
+		rollback(http.StatusBadGateway, "pipeline: "+err.Error())
 		return
 	}
 	if cbSink1 != nil {
-		s.RegisterCallbackSink(cbSink1)
+		s.RegisterCallbackSink(sessTCore, cbSink1)
 	}
 	if !singleLeg {
 		cbSink2, err := s.coord.Start(sessAccess)
 		if err != nil {
-			rollback(http.StatusBadRequest, "pipeline: "+err.Error())
+			rollback(http.StatusBadGateway, "pipeline: "+err.Error())
 			return
 		}
 		if cbSink2 != nil {
-			s.RegisterCallbackSink(cbSink2)
+			s.RegisterCallbackSink(sessAccess, cbSink2)
 		}
 	}
 
@@ -260,30 +272,59 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 	}
 }
 
+// ServiceProfile mô tả dịch vụ audio (codec gửi DCSF và task gửi AI).
 type ServiceProfile struct {
-	NeedsAudio bool
 	Codec      string
 	SampleRate int
-	NeedsVideo bool
-	EffectType string
-	SingleLeg  bool
 }
 
-// serviceProfiles là bảng tra cứu selectedService → ServiceProfile. Khớp
-// bảng selectedService trong docs/dcas-dcsf-signaling.md.
+// serviceProfiles là bảng tra cứu selectedService audio → ServiceProfile. Khớp
+// bảng selectedService trong docs/dcas-dcsf-signaling.md. Dịch vụ video nằm ở
+// ServerConfig.VideoServices (cấu hình video.services).
 var serviceProfiles = map[string]ServiceProfile{
-	"speech_to_text":       {NeedsAudio: true, Codec: "PCMU", SampleRate: 8000},
-	"realtime_translation": {NeedsAudio: true, Codec: "PCMU", SampleRate: 8000},
-	"change_background":    {NeedsAudio: false, NeedsVideo: true, EffectType: "bg_replace", SingleLeg: true},
-	"gesture_recognition":  {NeedsAudio: false, NeedsVideo: true},
+	"speech_to_text":       {Codec: "PCMU", SampleRate: 8000},
+	"realtime_translation": {Codec: "PCMU", SampleRate: 8000},
 }
 
 // lookupServiceProfile tra bảng serviceProfiles (case-insensitive). ok=false
-// nếu service chưa được DCAS hỗ trợ — caller nên ACK 200 {} mà không tạo
-// session, giữ đúng hành vi cũ của serviceToCodec.
+// nếu không phải dịch vụ audio.
 func lookupServiceProfile(service string) (ServiceProfile, bool) {
 	p, ok := serviceProfiles[strings.ToLower(service)]
 	return p, ok
+}
+
+// IsAudioService cho biết tên dịch vụ đã dùng cho audio (không được khai báo lại ở video.services).
+func IsAudioService(service string) bool {
+	_, ok := lookupServiceProfile(service)
+	return ok
+}
+
+// AI task video — trùng tên task trong WorkerRegistry và key callbackUrls của ctrl-result.
+const (
+	VideoTaskSegment = "video_segment"
+	VideoTaskGesture = "gesture_recognition"
+)
+
+// VideoService mô tả một dịch vụ video người dùng đăng ký: đúng một AI task
+// (1 dịch vụ ↔ 1 AI). Xem docs/giai-phap-video-service-catalog.md.
+type VideoService struct {
+	Enabled    bool
+	SingleLeg  bool   // true: chỉ tạo leg tcore; false: tcore + taccess
+	EffectType string // chỉ dùng với VideoTaskSegment
+	AITask     string // VideoTaskSegment | VideoTaskGesture
+}
+
+// DefaultVideoServices là danh mục khi không cấu hình video.services:
+// change_background → segmentation (AI repo mediapipe); video_effects → gesture
+// (AI repo gesture), chỉ có khi gesture được bật. Cả hai chỉ tạo leg tcore.
+func DefaultVideoServices(gestureEnabled bool) map[string]VideoService {
+	services := map[string]VideoService{
+		"change_background": {Enabled: true, SingleLeg: true, EffectType: "bg_replace", AITask: VideoTaskSegment},
+	}
+	if gestureEnabled {
+		services["video_effects"] = VideoService{Enabled: true, SingleLeg: true, AITask: VideoTaskGesture}
+	}
+	return services
 }
 
 // getCallSession handles GET /v1/vonras/call-sessions/:callId.
@@ -322,8 +363,8 @@ func (s *Server) ctrlResult(c *gin.Context) {
 
 	var singleLeg bool
 	if tcoreSess, ok := s.sessionMgr.Get(id + "-tcore"); ok {
-		if p, ok := lookupServiceProfile(tcoreSess.Task); ok {
-			singleLeg = p.SingleLeg
+		if v, ok := s.cfg.VideoServices[strings.ToLower(tcoreSess.Task)]; ok {
+			singleLeg = v.SingleLeg
 		}
 	}
 
@@ -373,20 +414,18 @@ func (s *Server) ctrlResult(c *gin.Context) {
 			CallbackURL:    tcoreCallbackURL,
 			MediaResources: tcoreMR,
 		}
-		if _, err := s.sessionMgr.Update(id+"-tcore", tcorePatch); err == nil {
+		if sessTCore, err := s.sessionMgr.Update(id+"-tcore", tcorePatch); err == nil {
 			for task, rawURL := range req.MediaResources.TCore.CallbackURLs {
 				if cb := taskUpdater.UpdateTaskCallbackSink(id+"-tcore", task, rawURL); cb != nil {
-					s.RegisterCallbackSink(cb)
+					s.RegisterCallbackSink(sessTCore, cb)
 				}
 			}
-			
+
 			if cb := s.coord.UpdateCallbackSink(id+"-tcore", tcoreCallbackURL); cb != nil {
-				s.RegisterCallbackSink(cb)
+				s.RegisterCallbackSink(sessTCore, cb)
 			}
 			if s.cfg.MockResultPump {
-				if sessTCore, ok := s.sessionMgr.Get(id + "-tcore"); ok {
-					s.coord.StartMockResultPump(sessTCore, req.MediaResources.TCore.Termination.TerminationID)
-				}
+				s.coord.StartMockResultPump(sessTCore, req.MediaResources.TCore.Termination.TerminationID)
 			}
 		}
 
@@ -400,19 +439,17 @@ func (s *Server) ctrlResult(c *gin.Context) {
 					},
 				},
 			}
-			if _, err := s.sessionMgr.Update(id+"-taccess", taccessPatch); err == nil {
+			if sessAccess, err := s.sessionMgr.Update(id+"-taccess", taccessPatch); err == nil {
 				for task, rawURL := range req.MediaResources.TAccess.CallbackURLs {
 					if cb := taskUpdater.UpdateTaskCallbackSink(id+"-taccess", task, rawURL); cb != nil {
-						s.RegisterCallbackSink(cb)
+						s.RegisterCallbackSink(sessAccess, cb)
 					}
 				}
 				if cb := s.coord.UpdateCallbackSink(id+"-taccess", req.MediaResources.TAccess.CallbackURL); cb != nil {
-					s.RegisterCallbackSink(cb)
+					s.RegisterCallbackSink(sessAccess, cb)
 				}
 				if s.cfg.MockResultPump {
-					if sessAccess, ok := s.sessionMgr.Get(id + "-taccess"); ok {
-						s.coord.StartMockResultPump(sessAccess, req.MediaResources.TAccess.Termination.TerminationID)
-					}
+					s.coord.StartMockResultPump(sessAccess, req.MediaResources.TAccess.Termination.TerminationID)
 				}
 			}
 		}
@@ -626,15 +663,9 @@ func (s *Server) metricsWrite(w io.Writer) {
 	fmt.Fprintf(w, "media_ai_result_queue_dropped_total %d\n", ds.Dropped)
 
 	// --- Callback retries ---
-	var totalCallbackRetries uint64
-	s.cbMu.Lock()
-	for _, cb := range s.httpCallbacks {
-		totalCallbackRetries += cb.Retries()
-	}
-	s.cbMu.Unlock()
 	fmt.Fprintf(w, "# HELP media_ai_callback_retry_total Total HTTP callback retry attempts\n")
 	fmt.Fprintf(w, "# TYPE media_ai_callback_retry_total counter\n")
-	fmt.Fprintf(w, "media_ai_callback_retry_total %d\n", totalCallbackRetries)
+	fmt.Fprintf(w, "media_ai_callback_retry_total %d\n", s.callbackRetries())
 
 	// --- RTP ingress ---
 	if s.ingress != nil {

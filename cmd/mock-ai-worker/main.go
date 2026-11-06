@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"media-ai-gateway/workers/mockai"
+	"media-ai-gateway/internal/mockai"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

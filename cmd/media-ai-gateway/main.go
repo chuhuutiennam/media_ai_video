@@ -191,8 +191,14 @@ func main() {
 	// muốn bật video runtime qua config reload
 	var videoPool *pipeline.VideoWorkerPool
 	var videoAIMgr *ai.VideoManager
+	videoServiceRouting := false // video dial qua registry theo (dịch vụ, task) → kiểm tra AI theo dịch vụ khi ANSWER
 	if cfg.Video.Enabled {
 		videoPool = pipeline.NewVideoWorkerPool(cfg.ToVideoWorkerPoolConfig())
+		for name, svc := range cfg.ToVideoServices() {
+			zap.L().Info("video service configured", zap.String("service", name), zap.Bool("enabled", svc.Enabled),
+				zap.String("ai_task", svc.AITask), zap.Bool("single_leg", svc.SingleLeg), zap.String("effect_type", svc.EffectType),
+				zap.Bool("from_video_services", len(cfg.Video.Services) != 0))
+		}
 
 		var videoDialer ai.VideoDialer
 		videoWorkers := cfg.ToVideoWorkers()
@@ -211,9 +217,11 @@ func main() {
 				grpcPool.Preconnect(worker.Addr)
 				addGRPCWatch(worker.Addr)
 				zap.L().Info("video AI worker registered", zap.String("worker_id", worker.ID),
-					zap.String("target", worker.Addr), zap.Strings("tasks", worker.Tasks), zap.Int("max_streams", worker.MaxStreams))
+					zap.String("target", worker.Addr), zap.Strings("tasks", worker.Tasks), zap.Strings("services", worker.Services),
+					zap.Int("max_streams", worker.MaxStreams))
 			}
 			videoDialer = ai.NewVideoRoutingDialer(workerReg, grpcPool.VideoDialFunc())
+			videoServiceRouting = true
 			zap.L().Info("video AI routing dialer active", zap.Int("worker_count", len(videoWorkers)))
 		} else {
 			videoDialer = ai.NullVideoDialer{}
@@ -250,6 +258,9 @@ func main() {
 	if cfg.AI.GRPCTarget != "" {
 		apiSrv.SetWorkerRegistry(workerReg)
 		apiSrv.SetGRPCPool(grpcPool)
+	}
+	if videoServiceRouting {
+		apiSrv.SetVideoWorkerRegistry(workerReg)
 	}
 
 	// ── PCAP capture (Linux only, debug) ──────────────────────────────────

@@ -14,6 +14,8 @@ The gesture mock validates JPEG content/dimensions and returns two moving hands,
 Thumb_Up, Victory and Wave reactions, then an empty snapshot every three media
 seconds. Results are scripted; they test transport and composition, not accuracy.
 
-Run `bash scripts/test-video-e2e.sh --gesture-mode mock --output-video --duration 3`. No model, webcam or GPU is
-needed. Input can be video, PCAP/PCAPNG or a generated test pattern.
+Run `bash scripts/test-video-e2e.sh --ai-mode mock` (change_background, segmentation) or
+`bash scripts/test-video-e2e.sh --gesture-only --gesture-mode mock --output-video --duration 3`
+(video_effects, gesture). No model, webcam or GPU is needed. Input can be video, PCAP/PCAPNG
+or a generated test pattern. Real AI services live in the separate `mediapipe` and `gesture` repos.
 See [video testing](../../docs/video-testing.md) for artifacts and scope.

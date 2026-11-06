@@ -192,7 +192,12 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	if !sess.VideoEnabled {
 		return fmt.Errorf("coordinator: session %s does not have video enabled", sess.ID)
 	}
-	gestureOnly := strings.EqualFold(sess.Task, "gesture_recognition")
+	// 1 dịch vụ ↔ 1 AI: mỗi session video chỉ mở đúng một AI task.
+	task := videoAITask(sess)
+	if task != videoTaskSegment && task != videoTaskGesture {
+		return fmt.Errorf("coordinator: unsupported video AI task %q", task)
+	}
+	gestureOnly := task == videoTaskGesture
 	if gestureOnly && !c.cfg.GestureEnabled {
 		return fmt.Errorf("coordinator: gesture_recognition requires video.gesture.enabled=true")
 	}
@@ -233,7 +238,7 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	}
 	var gestureQueue chan pipeline.VideoFrame
 	var gestureStream string
-	if c.cfg.GestureEnabled && !c.cfg.VideoEngine {
+	if gestureOnly && !c.cfg.VideoEngine {
 		if c.cfg.GestureFPS < 1 || c.cfg.GestureQueueSize < 1 {
 			return fmt.Errorf("invalid gesture profile")
 		}
@@ -251,7 +256,7 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 			source.Segmentation = &ai.VideoStreamConfig{EffectType: effect, InferWidth: inferW, InferHeight: inferH, InferFPS: inferFPS}
 			poolCfg.InferFPS = float64(inferFPS)
 		}
-		if c.cfg.GestureEnabled {
+		if gestureOnly {
 			source.Gesture = &ai.VideoStreamConfig{InferFPS: c.cfg.GestureFPS, MaxHands: c.cfg.GestureMaxHands, InferWidth: c.cfg.GestureMaxDimension}
 			poolCfg.InferFPS = max(poolCfg.InferFPS, float64(c.cfg.GestureFPS))
 		}
@@ -262,10 +267,11 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	}
 
 	streamCfg := ai.VideoStreamConfig{
-		EffectType:  effect,
-		InferWidth:  inferW,
-		InferHeight: inferH,
-		InferFPS:    inferFPS,
+		EffectType:      effect,
+		InferWidth:      inferW,
+		InferHeight:     inferH,
+		InferFPS:        inferFPS,
+		SelectedService: sess.Task, // chọn worker theo dịch vụ; không gửi lên wire segmentation
 	}
 	// Each task has its own result queue and pump, started by Start().
 	if source != nil {
@@ -343,6 +349,25 @@ func (c *Coordinator) startVideoJitterPump(sess *session.Session) {
 			}
 		}
 	}()
+}
+
+// AI task video (trùng controlplane.VideoTaskSegment / VideoTaskGesture).
+const (
+	videoTaskSegment = "video_segment"
+	videoTaskGesture = "gesture_recognition"
+)
+
+// videoAITask trả về AI task duy nhất của session video. Session không gán VideoAITask
+// (tạo trực tiếp, không qua danh mục) thì suy ra từ Task: video_effects (dịch vụ gesture
+// mặc định) hoặc gesture_recognition → gesture, còn lại → segmentation.
+func videoAITask(sess *session.Session) string {
+	if sess.VideoAITask != "" {
+		return strings.ToLower(sess.VideoAITask)
+	}
+	if strings.EqualFold(sess.Task, "video_effects") || strings.EqualFold(sess.Task, videoTaskGesture) {
+		return videoTaskGesture
+	}
+	return videoTaskSegment
 }
 
 func canonicalVideoID(id string) string {

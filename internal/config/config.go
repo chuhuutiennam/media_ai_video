@@ -153,6 +153,10 @@ type VideoSection struct {
 	DefaultEffectType string         `yaml:"default_effect_type"` // "bg_blur" | "bg_replace" | "bg_remove"
 	FrameQueueSize    int            `yaml:"frame_queue_size"`
 	AI                VideoAISection `yaml:"ai"`
+
+	// Services: danh mục dịch vụ video, mỗi dịch vụ đúng một AI service. Rỗng = config cũ
+	// (video.ai.workers / grpc_target / engine_target + video.gesture.enabled).
+	Services map[string]VideoServiceSection `yaml:"services"`
 }
 
 type GestureSection struct {
@@ -352,11 +356,13 @@ func Load(path string) (GatewayConfig, error) {
 	if v := cfg.AI.ReconnectMaxBackoffMs; v != 0 && (v < 1000 || v > 120000) {
 		return GatewayConfig{}, fmt.Errorf("ai.reconnect_max_backoff_ms must be 0 (gRPC default) or 1000..120000, got %d", v)
 	}
+	if err := cfg.normalizeVideoServices(); err != nil {
+		return GatewayConfig{}, err
+	}
 	if err := cfg.normalizeVideoWorkers(); err != nil {
 		return GatewayConfig{}, err
 	}
 	if cfg.Video.Gesture.Enabled {
-		g := cfg.Video.Gesture
 		hasGestureWorker := cfg.Video.AI.EngineTarget != ""
 		for _, worker := range cfg.ToVideoWorkers() {
 			for _, task := range worker.Tasks {
@@ -368,9 +374,11 @@ func Load(path string) (GatewayConfig, error) {
 		if !cfg.Video.Enabled || !hasGestureWorker {
 			return GatewayConfig{}, fmt.Errorf("gesture requires video.enabled and a gesture worker in video.ai.workers or video.ai.grpc_target")
 		}
-		if g.InferFPS < 1 || g.InferFPS > 60 || g.MaxDimension < 32 || g.MaxDimension > 1920 || g.MaxHands < 1 || g.MaxHands > 8 || g.FrameQueueSize < 1 || g.FrameQueueSize > 32 {
-			return GatewayConfig{}, fmt.Errorf("invalid gesture FPS/dimension/hands/queue limits")
-		}
+	}
+	// Giới hạn gesture áp dụng khi gesture được dùng (config cũ hoặc dịch vụ gesture trong video.services).
+	if g := cfg.Video.Gesture; cfg.gestureInUse() &&
+		(g.InferFPS < 1 || g.InferFPS > 60 || g.MaxDimension < 32 || g.MaxDimension > 1920 || g.MaxHands < 1 || g.MaxHands > 8 || g.FrameQueueSize < 1 || g.FrameQueueSize > 32) {
+		return GatewayConfig{}, fmt.Errorf("invalid gesture FPS/dimension/hands/queue limits")
 	}
 	return cfg, nil
 }
@@ -442,7 +450,7 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		VideoInferFPS:    c.Video.InferFPS,
 		VideoJPEGQuality: c.Video.JPEGQuality,
 		VideoEffectType:  c.Video.DefaultEffectType,
-		GestureEnabled:   c.Video.Gesture.Enabled, GestureFPS: c.Video.Gesture.InferFPS,
+		GestureEnabled:   c.gestureInUse(), GestureFPS: c.Video.Gesture.InferFPS,
 		GestureMaxDimension: c.Video.Gesture.MaxDimension, GestureMaxHands: c.Video.Gesture.MaxHands, GestureQueueSize: c.Video.Gesture.FrameQueueSize,
 		VideoEngine: c.Video.AI.EngineTarget != "", VideoSourceMaxDimension: c.Video.AI.SourceMaxDimension,
 	}
@@ -520,6 +528,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		MockResultPump:         c.Gateway.MockResultPump,
 		EgressQueueFrames:      c.Session.PerSessionEgressQueue,
 		VideoEnabled:           c.Video.Enabled,
+		VideoServices:          c.ToVideoServices(),
 	}
 }
 

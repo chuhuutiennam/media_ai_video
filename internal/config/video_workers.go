@@ -58,7 +58,11 @@ func (c *GatewayConfig) normalizeVideoWorkers() error {
 
 // ToVideoWorkers resolves explicit workers or the backward-compatible shared
 // endpoint. Both forms are registered in the same registry, never dialed directly.
+// Có video.services thì trả worker theo dịch vụ (mỗi worker gắn đúng một dịch vụ).
 func (c GatewayConfig) ToVideoWorkers() []ai.WorkerInfo {
+	if len(c.Video.Services) != 0 {
+		return c.videoServiceWorkers()
+	}
 	configured := c.Video.AI.Workers
 	if len(configured) == 0 {
 		target := strings.TrimSpace(c.Video.AI.GRPCTarget)

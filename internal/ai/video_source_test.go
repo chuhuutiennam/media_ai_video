@@ -16,9 +16,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	pb "media-ai-gateway/internal/ai/proto"
+	"media-ai-gateway/internal/mockai"
 	"media-ai-gateway/internal/pipeline"
 	"media-ai-gateway/internal/videoengine"
-	"media-ai-gateway/workers/mockai"
 	"sync"
 )
 

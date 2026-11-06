@@ -18,6 +18,11 @@ type WorkerInfo struct {
 	MediaTypes   []string
 	InputFormats []string
 	Protocols    []string
+
+	// Services: dịch vụ người dùng (selectedService) mà worker phục vụ. Rỗng = mọi dịch vụ
+	// (worker khai báo theo kiểu cũ video.ai.workers / grpc_target). Worker từ video.services
+	// luôn gắn đúng một dịch vụ, nên hai dịch vụ không bao giờ dùng chung worker.
+	Services []string
 }
 
 // Supports trả về true nếu worker có thể xử lý yêu cầu với language và task cho trước.

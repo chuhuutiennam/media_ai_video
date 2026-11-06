@@ -72,7 +72,7 @@ func TestVideoAnswerRollback(t *testing.T) {
 	}{
 		{name: "port exhaustion", ports: 1, want: http.StatusServiceUnavailable},
 		{name: "second bind fails", ports: 2, occupied: true, want: http.StatusInternalServerError},
-		{name: "coordinator fails", ports: 2, startErr: fmt.Errorf("start failed"), want: http.StatusBadRequest},
+		{name: "coordinator fails", ports: 2, startErr: fmt.Errorf("start failed"), want: http.StatusBadGateway},
 		{name: "video AI fails", ports: 2, videoErr: fmt.Errorf("AI unavailable"), want: http.StatusBadGateway},
 		{name: "second video AI fails", ports: 2, videoErr: fmt.Errorf("second AI unavailable"), videoFailAt: 2, want: http.StatusBadGateway},
 	} {
@@ -86,6 +86,8 @@ func TestVideoAnswerRollback(t *testing.T) {
 				defer sock.Close()
 			}
 			s := newTestServerWithVideo(t, &fakeStarter{err: tc.startErr, videoErr: tc.videoErr, videoFailAt: tc.videoFailAt}, start, end)
+			// Rollback cần dịch vụ 2 leg: cấu hình change_background với legs: both.
+			s.cfg.VideoServices["change_background"] = VideoService{Enabled: true, EffectType: "bg_replace", AITask: VideoTaskSegment}
 			w := postJSON(t, s, notifyPath(testCallID), SessionEvent{Event: "ANSWER", SelectedService: "change_background"})
 			assertStatus(t, w, tc.want)
 			if s.sessionMgr.Count() != 0 {
@@ -115,19 +117,23 @@ func TestGestureOnlyAnswerAllocatesVideoWithoutBackground(t *testing.T) {
 	starter := &fakeStarter{}
 	start, end := availableUDPRange(t, 4)
 	s := newTestServerWithVideo(t, starter, start, end)
-	w := postJSON(t, s, notifyPath(testCallID), SessionEvent{Event: "ANSWER", SelectedService: "gesture_recognition"})
+	w := postJSON(t, s, notifyPath(testCallID), SessionEvent{Event: "ANSWER", SelectedService: "video_effects"})
 	assertStatus(t, w, http.StatusCreated)
 	var response SessionResponse
 	decodeJSON(t, w, &response)
-	if response.TCoreVideoRTPPort == 0 || response.TAccessVideoRTPPort == 0 || response.TCoreRTPPort != 0 || response.TAccessRTPPort != 0 {
-		t.Fatal("gesture-only allocated the wrong media ports")
+	// video_effects chỉ tạo leg tcore (legs: tcore), giống change_background.
+	if response.TCoreVideoRTPPort == 0 || response.TAccessVideoRTPPort != 0 || response.TCoreRTPPort != 0 || response.TAccessRTPPort != 0 {
+		t.Fatalf("gesture-only allocated the wrong media ports: %+v", response)
 	}
-	if len(starter.sessions) != 2 {
-		t.Fatal("gesture-only did not start both video legs")
+	if len(starter.sessions) != 1 || starter.sessions[0].ID != testCallID+"-tcore" || starter.videoStarted != 1 {
+		t.Fatalf("gesture-only must start only the tcore video leg, got %d sessions / %d video", len(starter.sessions), starter.videoStarted)
+	}
+	if _, ok := s.sessionMgr.Get(testCallID + "-taccess"); ok {
+		t.Fatal("gesture-only created a taccess session")
 	}
 	for _, sess := range starter.sessions {
 		defer s.sessionMgr.Close(sess.ID)
-		if sess.Task != "gesture_recognition" || sess.Codec != "" || sess.EffectType != "" || !sess.VideoEnabled {
+		if sess.Task != "video_effects" || sess.Codec != "" || sess.EffectType != "" || !sess.VideoEnabled || sess.VideoAITask != VideoTaskGesture {
 			t.Fatalf("gesture-only session requested audio/background: %+v", sess)
 		}
 	}

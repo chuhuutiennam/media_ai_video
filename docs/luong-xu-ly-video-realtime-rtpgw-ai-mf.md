@@ -16,7 +16,8 @@ Có hai đường gọi AI đang được hỗ trợ:
 Hai đường cùng trả về callback mask/gesture cho MF. Không cấu hình đồng thời
 `engine_target` với các target direct-worker trong cùng cấu hình video AI.
 
-MF C++ hiện tại là **MF lab, một call/process, hai leg**. Nguồn frame màu được
+MF C++ hiện tại là **MF lab, một call/process, hai leg** (`--legs 1` cho dịch vụ 1 leg:
+gateway tcore → MF tAccess). Nguồn frame màu được
 sender chuẩn bị trong `frames.rgba`/`frames.json`; PNG debug được xuất sau seal.
 Clock nguồn được neo bằng API `/start`.
 Mặc định `realtime` ghép theo deadline và ghi lại quyết định tại thời điểm phát.
@@ -198,16 +199,29 @@ Content-Type: application/json
 }
 ```
 
-Gateway kiểm tra service, capacity, video.enabled và port pool; tạo hai session
-`call-001-tcore`/`call-001-taccess`, listener và pipeline. Video-only không cần cấp
-port audio. Nếu tạo tài nguyên sau thất bại, rollback tài nguyên đã tạo.
+Gateway tra dịch vụ trong danh mục video (`video.services`, hoặc danh mục mặc định khi
+dùng config cũ — xem [giai-phap-video-service-catalog.md](giai-phap-video-service-catalog.md)),
+kiểm tra capacity, video.enabled, port pool và AI của chính dịch vụ đó còn slot (hết → 503);
+tạo session theo `legs` của dịch vụ (`call-001-tcore`; thêm `call-001-taccess` nếu
+`legs: both`, mặc định `tcore`),
+listener và pipeline. Video-only không cần cấp port audio. Nếu tạo tài nguyên sau thất bại,
+rollback tài nguyên đã tạo.
 
-- `change_background`: mở segmentation; thêm gesture nếu `video.gesture.enabled`.
-- `gesture_recognition`: chỉ gesture, không segmentation.
+Mỗi dịch vụ dùng **đúng một AI service** (1 dịch vụ ↔ 1 AI):
+
+- `change_background`: chỉ segmentation; mặc định chỉ leg tcore (`legs: tcore`), kết quả
+  gửi về callback của tAccess theo ctrl-result single-leg. Không mở gesture.
+- `video_effects`: chỉ gesture (AI task `gesture_recognition`, repo gesture), không segmentation;
+  cũng chỉ leg tcore, kết quả gesture gửi về callback của tAccess như trên.
+  `gesture_recognition` không còn là tên dịch vụ mặc định (gửi tên này → ACK 200 `{}`).
+- Dịch vụ audio (`speech_to_text`, `realtime_translation`) không mở video kể cả khi
+  `bearerCapability: VIDEO`. Dịch vụ tắt (`enabled: false`) hoặc lạ: ACK 200 `{}`.
 - BEGIN trả 200, không tạo pipeline; service chưa hỗ trợ có thể được ACK 200 mà
   không tạo session. Không dùng riêng HTTP 200 để kết luận inference hoạt động.
 
-Trích response ANSWER thành công, HTTP 201:
+Trích response ANSWER thành công của dịch vụ 1 leg (`change_background`, `video_effects`),
+HTTP 201. Dịch vụ `legs: both` trả thêm `taccess_video_rtp_port` và
+`taccess_local_non_dc_video_media`:
 
 ```json
 {
@@ -216,7 +230,6 @@ Trích response ANSWER thành công, HTTP 201:
   "gateway_id": "gw-video-external",
   "rtp_ip": "127.0.0.1",
   "tcore_video_rtp_port": 41000,
-  "taccess_video_rtp_port": 41001,
   "tcore_local_non_dc_video_media": {
     "sdpmLine": "video 41000 RTP/AVP 96",
     "sdpaLines": ["rtpmap:96 H264/90000", "fmtp:96 packetization-mode=1;profile-level-id=42e01f", "sendrecv"]
@@ -456,13 +469,18 @@ RPC là **`/video.VideoAIService/Process`**. Message đầu là SourceOpen:
     "stream_id": "call-001:tcore:video",
     "media_epoch": "media-001",
     "selected_service": "change_background",
-    "input_fps": 15,
+    "input_fps": 5,
     "input_max_dimension": 640,
-    "segmentation": {"ai_service":"segmentation","selected_service":"change_background","media_epoch":"media-001","input_format":"jpeg","inference_width":256,"inference_height":256,"inference_fps":5,"effect_type":"bg_replace"},
-    "gesture": {"ai_service":"gesture_recognition","selected_service":"change_background","media_epoch":"media-001","input_format":"jpeg","inference_width":640,"inference_height":0,"inference_fps":15,"max_hands":4}
+    "segmentation": {"ai_service":"segmentation","selected_service":"change_background","media_epoch":"media-001","input_format":"jpeg","inference_width":256,"inference_height":256,"inference_fps":5,"effect_type":"bg_replace"}
   }
 }
 ```
+
+Theo quy tắc 1 dịch vụ ↔ 1 AI, RTPGW chỉ khai báo **một** task trong SourceOpen:
+`change_background` chỉ có `segmentation`; `video_effects` chỉ có `gesture`, ví dụ
+`"gesture": {"ai_service":"gesture_recognition","selected_service":"video_effects","media_epoch":"media-001","input_format":"jpeg","inference_width":640,"inference_height":0,"inference_fps":15,"max_hands":4}`
+với `input_fps` 15. Engine vẫn hỗ trợ nhiều task/source như sơ đồ trên, nhưng gateway
+không ghép hai AI vào một dịch vụ.
 
 Ở SourceOpen, gesture inference_width là cạnh tối đa, inference_height phải bằng
 0; đây chưa phải kích thước JPEG cố định gửi cho worker. Media epoch của mỗi
@@ -545,7 +563,7 @@ recognizer/max hands, rồi chờ callback MediaPipe cho từng frame. Timeout n
 
 Mặc định code là `palm/hysteresis`; muốn dùng `steps` phải đặt trong config đang
 chạy và cập nhật package deployment. Upgrade giữ YAML hiện có, không tự đổi
-thuật toán. Xem [Wave evaluation](../workers/gesture/docs/wave-evaluation.md).
+thuật toán. Xem [Wave evaluation](https://github.com/chuhuutiennam/gesture/blob/main/docs/wave-evaluation.md) trong repo gesture.
 
 ## 11. Từ kết quả worker đến callback MF
 
@@ -740,7 +758,10 @@ thoát, các task URL override được xóa cùng sink của session.
 
 Đây là ví dụ receiver triển khai riêng, cần cung cấp các endpoint tương ứng.
 Không có override thì hai task vẫn gửi đến `callbackUrl` theo leg bằng worker
-riêng; payload, session/stream ID và `event_type` giữ nguyên. POST ctrl-result
+riêng; payload, session/stream ID và `event_type` giữ nguyên. Dịch vụ 1 leg
+(`legs: tcore`) chỉ có session tcore: session này lấy `callbackUrl` từ `tAccess` nhưng
+`callbackUrls` từ `tCore`, nên DCSF đặt override theo task ở `tCore`; `callbackUrls` trong
+`tAccess` bị bỏ qua. POST ctrl-result
 bỏ qua key task sẽ giữ override hiện tại; gửi chuỗi rỗng sẽ xóa override và quay
 về callbackUrl. Key không thuộc hai task trên bị từ chối trước khi áp dụng.
 Override chỉ thay HTTP sink; DataChannel hoặc sink khác vẫn nhận kết quả.
@@ -1083,8 +1104,8 @@ sequenceDiagram
     H->>H: Kiểm tra pixel, số frame, PTS và cleanup
 ```
 
-`POST /finalize` body rỗng, seal cả hai leg. Call không có hai Renderer hoặc đã
-có callback error trả 409. Với realtime/arrival, seal giữ clock và không ghép lại
+`POST /finalize` body rỗng, seal mọi leg. Call chưa có đủ Renderer theo `--legs`
+(mặc định 2) hoặc đã có callback error trả 409. Với realtime/arrival, seal giữ clock và không ghép lại
 frame đã phát. Với source, seal bắt đầu export offline bằng callback đã nhận;
 script bỏ bước chờ frame đầu tiên trước seal. Callback mới sau seal bị từ chối; retry có nội dung giống hệt kết quả đã nhận vẫn
 được deduplicate khi không có lỗi renderer.
@@ -1117,7 +1138,7 @@ Trích status hoàn tất của một leg:
 
 Status source có `gesture_render_mode: "source"` và `realtime: false` ở cả root
 và leg. Ví dụ trên lược bỏ leg tAccess và một số counter; top-level finalized thực tế chỉ
-true khi cả hai leg đã hoàn tất. `frames_rendered` là số vị trí trên timeline đã
+true khi đủ số leg theo `--legs` đã hoàn tất. `frames_rendered` là số vị trí trên timeline đã
 quyết định, gồm vị trí lặp; `frames_written` là ảnh mới đã capture, và được export đủ khi finalized. Khi thành công:
 
 ```text
@@ -1204,42 +1225,62 @@ Kết nối gRPC tới worker/Engine được theo dõi bởi `ai.watch_reconnec
 khi worker chết lâu (0 = mặc định gRPC, tới 120s); ba file mẫu video đặt `5000`.
 Chi tiết hành vi và log xem [rtp-to-ai-pipeline.md §5](rtp-to-ai-pipeline.md).
 
-Chạy hai model đã khởi động sẵn, runner tự build binary mới nếu không có bin-dir:
+Danh mục dịch vụ mẫu ở [gateway-video-services.yaml](../config/gateway-video-services.yaml).
+AI service là các repo riêng, clone cạnh repo này:
+
+| Dịch vụ (`selectedService`) | AI task | Repo AI | gRPC / metrics mặc định | Leg |
+| --- | --- | --- | --- | --- |
+| `change_background` | `video_segment` (`ai_service=segmentation`) | [mediapipe](https://github.com/chuhuutiennam/mediapipe) (`../mediapipe`) | `127.0.0.1:50052` / `9101` | tcore |
+| `video_effects` | `gesture_recognition` | [gesture](https://github.com/chuhuutiennam/gesture) (`../gesture`, kèm `assets/emoji` cho MF) | `127.0.0.1:50053` / `9102` | tcore |
+
+Proto gốc là [video.proto](../internal/ai/proto/video.proto) của repo này;
+`scripts/generate-video-proto.sh` chép sang hai repo AI nếu có (`MEDIAPIPE_DIR`, `GESTURE_DIR`).
+
+Mỗi lần E2E chạy **một** dịch vụ (1 dịch vụ ↔ 1 AI). Runner tự build binary mới nếu
+không có bin-dir:
 
 ```bash
-bash scripts/test-video-external-e2e.sh \
-  --ai-target 127.0.0.1:50052 --gesture-target 127.0.0.1:50053 \
+# change_background: segmentation, 1 leg (gateway tcore → MF tAccess)
+bash scripts/test-video-external-e2e.sh --ai-target 127.0.0.1:50052 \
   --input data/gesture_sample/wave_hand.mp4 --duration 6 \
-  --playout-delay-ms 300 --mask-max-age-ms 500 --gesture-max-age-ms 500 \
-  --gesture-render-mode realtime --artifacts-dir /tmp/video-realtime
+  --playout-delay-ms 300 --mask-max-age-ms 500 --artifacts-dir /tmp/video-segmentation
+
+# video_effects: gesture, 1 leg (gateway tcore → MF tAccess)
+bash scripts/test-video-external-e2e.sh --gesture-only --gesture-target 127.0.0.1:50053 \
+  --input data/gesture_sample/wave_hand.mp4 --duration 6 --gesture-max-age-ms 500 \
+  --gesture-render-mode realtime --artifacts-dir /tmp/video-gesture
 ```
 
-Hai cách xuất MP4 test mới, vẫn dùng hai worker thật đã khởi động riêng:
+Hai cách xuất MP4 test cho gesture, worker thật đã khởi động riêng:
 
 ```bash
 # Hiển thị gesture khi nhận được để đo trễ
-bash scripts/test-video-external-e2e.sh \
-  --ai-target 127.0.0.1:50052 --gesture-target 127.0.0.1:50053 \
+bash scripts/test-video-external-e2e.sh --gesture-only --gesture-target 127.0.0.1:50053 \
   --input data/gesture_sample/wave_hand.mp4 --duration 10 --require-gesture \
   --gesture-render-mode arrival --artifacts-dir /tmp/video-gesture-arrival
 
-# Nhận đủ callback rồi ghép cả hai task về timeline nguồn
-bash scripts/test-video-external-e2e.sh \
-  --ai-target 127.0.0.1:50052 --gesture-target 127.0.0.1:50053 \
+# Nhận đủ callback rồi ghép về timeline nguồn
+bash scripts/test-video-external-e2e.sh --gesture-only --gesture-target 127.0.0.1:50053 \
   --input data/gesture_sample/wave_hand.mp4 --duration 10 --require-gesture \
   --gesture-render-mode source --artifacts-dir /tmp/video-gesture-source
 ```
+
+Script truyền `--legs` cho `mf_cpp` theo số leg của dịch vụ (`change_background` = 1), vì
+MF chỉ finalize khi đủ số leg đã render.
 
 `test-video-e2e.sh` cũng nhận flag này; `test-video-engine-e2e.sh` chuyển tiếp nó
 qua option pass-through. Tùy chọn được lưu trong options.json/result.json/status;
 validator chọn đúng chính sách và kiểm tra pixel, không bỏ kiểm tra sticker.
 
-Thêm `--require-gesture` khi muốn test FAIL nếu không frame nào có reaction theo
-mode đã chọn. Ở realtime/arrival, callback sau khi playout hết có thể chỉ có trace.
-Với gesture-only thêm `--gesture-only`; segmentation bị tắt. Khi dùng bin-dir,
+Thêm `--require-gesture` (cùng `--gesture-only`) khi muốn test FAIL nếu không frame nào
+có reaction theo mode đã chọn. Ở realtime/arrival, callback sau khi playout hết có thể chỉ
+có trace. Gesture chỉ chạy với `--gesture-only`; không có chế độ ghép hai task. Khi dùng bin-dir,
 phải rebuild MF và RTP sender để có raw spool, deferred-source-png, source-start
 và export mới; preflight từ chối MF thiếu `--gesture-render-mode`.
 Trên WSL, dùng filesystem Linux `/tmp` để giảm nhiễu I/O từ ổ Windows.
+
+Hai đoạn kiểm chứng dưới đây ghi lại kết quả **trước** quy tắc 1 dịch vụ ↔ 1 AI (khi
+`change_background` còn ghép segmentation + gesture); chế độ ghép đó không còn chạy được.
 
 Kiểm chứng đã thực hiện cho thay đổi MF: hai task **mock**, nguồn video
 `wave_hand.mp4`, 3 giây, 90 frame nguồn/leg, 15 mask và 45 gesture callback/leg.
@@ -1265,8 +1306,8 @@ không suy rộng thành accuracy model, capacity nhiều call hoặc SLO produc
 | Config/frame/result protobuf | [video.proto](../internal/ai/proto/video.proto), [method.go](../internal/ai/proto/method.go) |
 | Direct routing và task client | [video_grpc_dialer.go](../internal/ai/video_grpc_dialer.go), [video_task_dialer.go](../internal/ai/video_task_dialer.go) |
 | Source client và Engine | [video_source_client.go](../internal/ai/video_source_client.go), [engine.go](../internal/videoengine/engine.go) |
-| Segmentation runtime | [segmenter.py](../workers/mediapipe/src/mediapipe_video/segmenter.py) |
-| Gesture runtime/filter/reaction | [server.py](../workers/gesture/src/server.py), [gesture_events.py](../workers/gesture/src/gesture_events.py), [wave_detector.py](../workers/gesture/src/wave_detector.py) |
+| Segmentation runtime (repo mediapipe) | [segmenter.py](https://github.com/chuhuutiennam/mediapipe/blob/main/src/mediapipe_video/segmenter.py) |
+| Gesture runtime/filter/reaction (repo gesture) | [server.py](https://github.com/chuhuutiennam/gesture/blob/main/src/server.py), [gesture_events.py](https://github.com/chuhuutiennam/gesture/blob/main/src/gesture_events.py), [wave_detector.py](https://github.com/chuhuutiennam/gesture/blob/main/src/wave_detector.py) |
 | Result queue và HTTP/2 sink | [dispatcher.go](../internal/result/dispatcher.go), [http_callback.go](../internal/result/http_callback.go) |
 | Chuẩn bị RGBA và source-start | [frames.go](../cmd/mock-video-rtp-sender/frames.go), [main.go](../cmd/mock-video-rtp-sender/main.go) |
 | MF receiver, compositor và recorder | [callback_server.cpp](../mf/src/callback_server.cpp), [renderer.cpp](../mf/src/renderer.cpp), [renderer.hpp](../mf/include/renderer.hpp) |

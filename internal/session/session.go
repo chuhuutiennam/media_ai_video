@@ -60,6 +60,9 @@ type Session struct {
 	VideoInferHeight int
 	VideoInferFPS    int
 	EffectType       string // "bg_blur" | "bg_replace" | "bg_remove"
+	// VideoAITask là AI task duy nhất của dịch vụ video (1 dịch vụ ↔ 1 AI):
+	// "video_segment" | "gesture_recognition". Rỗng = suy ra từ Task (xem coordinator).
+	VideoAITask string
 
 	PacketQueue chan pipeline.MediaPacket
 	AudioQueue  chan pipeline.AudioChunk

@@ -121,6 +121,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: |
+            Lỗi khởi động pipeline hoặc kết nối AI (`pipeline: ...` cho audio,
+            `video pipeline: ...` cho video). DCAS đã đóng session và trả port.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "503":
           $ref: "#/components/responses/ServiceUnavailable"
 

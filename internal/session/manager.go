@@ -73,6 +73,7 @@ type SessionConfig struct {
 	VideoInferHeight int
 	VideoInferFPS    int
 	EffectType       string
+	VideoAITask      string // AI task duy nhất của dịch vụ video: "video_segment" | "gesture_recognition"
 }
 
 // SessionPatch giữ các field có thể cập nhật sau khi session được tạo.
@@ -152,6 +153,7 @@ func (m *Manager) Create(cfg SessionConfig) (*Session, error) {
 		VideoInferHeight: cfg.VideoInferHeight,
 		VideoInferFPS:    cfg.VideoInferFPS,
 		EffectType:       cfg.EffectType,
+		VideoAITask:      cfg.VideoAITask,
 		PacketQueue:      make(chan pipeline.MediaPacket, m.cfg.PacketQueueSize),
 		AudioQueue:       make(chan pipeline.AudioChunk, m.cfg.AudioQueueSize),
 		ResultQueue:      make(chan pipeline.RecognitionResult, m.cfg.ResultQueueSize),

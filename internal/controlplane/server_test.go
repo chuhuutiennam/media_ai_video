@@ -276,7 +276,7 @@ func TestNotifyEvent_Answer_CoordFail_RollsBack(t *testing.T) {
 	s := newTestServer(t, coord)
 
 	w := postJSON(t, s, notifyPath(testCallID), validAnswerReq())
-	assertStatus(t, w, http.StatusBadRequest)
+	assertStatus(t, w, http.StatusBadGateway)
 
 	wg := getPath(t, s, sessionPath(testCallID))
 	assertStatus(t, wg, http.StatusNotFound)
@@ -681,8 +681,9 @@ func TestNotifyEvent_Answer_VideoOnly_ChangeBackground(t *testing.T) {
 	if resp.TCoreRTPPort != 0 || resp.TAccessRTPPort != 0 {
 		t.Errorf("audio RTP port: want 0,0 (ServiceProfile NeedsAudio=false không được cấp port audio), got tcore=%d taccess=%d", resp.TCoreRTPPort, resp.TAccessRTPPort)
 	}
-	if resp.TCoreVideoRTPPort == 0 || resp.TAccessVideoRTPPort == 0 {
-		t.Errorf("video RTP port: kỳ vọng được cấp (khác 0), got tcore=%d taccess=%d", resp.TCoreVideoRTPPort, resp.TAccessVideoRTPPort)
+	// Danh mục mặc định: change_background chỉ leg tcore (legs: tcore).
+	if resp.TCoreVideoRTPPort == 0 || resp.TAccessVideoRTPPort != 0 {
+		t.Errorf("video RTP port: want tcore≠0, taccess=0, got tcore=%d taccess=%d", resp.TCoreVideoRTPPort, resp.TAccessVideoRTPPort)
 	}
 	if resp.TCoreLocalNonDcMedia != nil {
 		t.Error("tcore_local_non_dc_media: kỳ vọng nil (không có audio track)")
@@ -694,9 +695,9 @@ func TestNotifyEvent_Answer_VideoOnly_ChangeBackground(t *testing.T) {
 		t.Errorf("SDP m-line: want bắt đầu bằng \"video \", got %q", resp.TCoreLocalNonDcVideoMedia.SDPMLine)
 	}
 
-	// 1 call → 2 session (tcore+taccess) như audio, dù không có audio codec.
-	if len(coord.sessions) != 2 {
-		t.Fatalf("coordinator started %d session, want 2", len(coord.sessions))
+	// 1 call → 1 session tcore; chỉ AI segmentation (1 dịch vụ ↔ 1 AI).
+	if len(coord.sessions) != 1 || coord.sessions[0].ID != testCallID+"-tcore" {
+		t.Fatalf("coordinator started %d session, want only tcore", len(coord.sessions))
 	}
 	for _, sess := range coord.sessions {
 		if sess.Codec != "" {
@@ -705,6 +706,9 @@ func TestNotifyEvent_Answer_VideoOnly_ChangeBackground(t *testing.T) {
 		if !sess.VideoEnabled {
 			t.Errorf("session %s: VideoEnabled = false, want true", sess.ID)
 		}
+		if sess.VideoAITask != VideoTaskSegment || sess.EffectType != "bg_replace" {
+			t.Errorf("session %s: VideoAITask=%q EffectType=%q, want video_segment/bg_replace", sess.ID, sess.VideoAITask, sess.EffectType)
+		}
 	}
 
 	// Dọn session để giải phóng UDP socket đã bind thật (tránh rò rỉ giữa các test).
@@ -712,11 +716,10 @@ func TestNotifyEvent_Answer_VideoOnly_ChangeBackground(t *testing.T) {
 	s.sessionMgr.Close(testCallID + "-taccess")
 }
 
-// TestNotifyEvent_Answer_VideoOnly_BearerCapabilityStillWorks verify service
-// audio bình thường (speech_to_text) VẪN nhận video khi bearerCapability:
-// VIDEO — đảm bảo thêm ServiceProfile.NeedsVideo không phá vỡ đường tín
-// hiệu bearerCapability hiện có (2 cách bật video độc lập, cả 2 phải chạy được).
-func TestNotifyEvent_Answer_VideoOnly_BearerCapabilityStillWorks(t *testing.T) {
+// TestNotifyEvent_Answer_AudioService_BearerVideoIgnored: 1 dịch vụ ↔ 1 AI —
+// dịch vụ audio (speech_to_text) KHÔNG mở video dù bearerCapability: VIDEO
+// (trước đây mở thêm segmentation, tức một dịch vụ dùng 2 AI). Audio vẫn chạy bình thường.
+func TestNotifyEvent_Answer_AudioService_BearerVideoIgnored(t *testing.T) {
 	coord := &fakeStarter{}
 	start, end := availableUDPRange(t, 10)
 	s := newTestServerWithVideo(t, coord, start, end)
@@ -739,11 +742,19 @@ func TestNotifyEvent_Answer_VideoOnly_BearerCapabilityStillWorks(t *testing.T) {
 	if resp.TCoreRTPPort == 0 {
 		t.Error("audio RTP port: kỳ vọng được cấp (service cần audio)")
 	}
-	if resp.TCoreVideoRTPPort == 0 {
-		t.Error("video RTP port: kỳ vọng được cấp (bearerCapability=VIDEO)")
+	if resp.TCoreVideoRTPPort != 0 || resp.TAccessVideoRTPPort != 0 || resp.TCoreLocalNonDcVideoMedia != nil {
+		t.Errorf("video: dịch vụ audio không được mở video, got tcore=%d taccess=%d", resp.TCoreVideoRTPPort, resp.TAccessVideoRTPPort)
+	}
+	for _, sess := range coord.sessions {
+		if sess.VideoEnabled || sess.VideoAITask != "" {
+			t.Errorf("session %s: VideoEnabled=%v VideoAITask=%q, want false/rỗng", sess.ID, sess.VideoEnabled, sess.VideoAITask)
+		}
+	}
+	if coord.videoStarted != 0 {
+		t.Errorf("StartVideo được gọi %d lần, want 0", coord.videoStarted)
 	}
 
-	// Audio must still arrive on its dedicated UDP ports after adding video.
+	// Audio must still arrive on its dedicated UDP ports.
 	for _, leg := range []struct {
 		id   string
 		port int

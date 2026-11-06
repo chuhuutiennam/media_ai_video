@@ -3,6 +3,7 @@ package ai
 import (
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,14 +19,23 @@ type WorkerRegistry struct {
 	ttl     time.Duration // 0 = không expire
 }
 
+// servesVideo: worker phục vụ được dịch vụ service với AI task qua giao thức video cho trước.
+// Worker không khai báo Services (kiểu cũ) phục vụ mọi dịch vụ.
+func (w WorkerInfo) servesVideo(service, task, format, protocol string) bool {
+	return slices.Contains(w.Tasks, task) && slices.Contains(w.MediaTypes, "video") &&
+		slices.Contains(w.InputFormats, format) && slices.Contains(w.Protocols, protocol) &&
+		(len(w.Services) == 0 || slices.ContainsFunc(w.Services, func(s string) bool { return strings.EqualFold(s, service) }))
+}
+
 // SelectVideoTask requires explicit capabilities and atomically reserves a slot.
 // Empty/wildcard audio registrations must never be selected for a video RPC.
-func (r *WorkerRegistry) SelectVideoTask(task, format, protocol string) (WorkerInfo, error) {
+// service là selectedService của cuộc gọi; worker gắn dịch vụ khác bị loại.
+func (r *WorkerRegistry) SelectVideoTask(service, task, format, protocol string) (WorkerInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var best *WorkerInfo
 	for _, w := range r.listFresh(time.Now()) {
-		if !slices.Contains(w.Tasks, task) || !slices.Contains(w.MediaTypes, "video") || !slices.Contains(w.InputFormats, format) || !slices.Contains(w.Protocols, protocol) || w.atCapacity() {
+		if !w.servesVideo(service, task, format, protocol) || w.atCapacity() {
 			continue
 		}
 		if best == nil || w.loadScore() < best.loadScore() {
@@ -41,6 +51,20 @@ func (r *WorkerRegistry) SelectVideoTask(task, format, protocol string) (WorkerI
 	r.workers[w.ID] = w
 	return w, nil
 }
+
+// HasVideoCapacity: còn worker fresh phục vụ (service, task) qua VideoStream/Segment (JPEG) với
+// slot trống. Chỉ đọc, không giữ slot — slot vẫn được giữ lúc dial (SelectVideoTask).
+func (r *WorkerRegistry) HasVideoCapacity(service, task string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, w := range r.listFresh(time.Now()) {
+		if w.servesVideo(service, task, "jpeg", "video_segment") && !w.atCapacity() {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *WorkerRegistry) ReleaseVideoTask(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
