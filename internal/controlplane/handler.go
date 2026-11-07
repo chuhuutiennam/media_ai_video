@@ -53,6 +53,13 @@ func (s *Server) notifyEvent(c *gin.Context) {
 func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent) {
 	service := strings.ToLower(event.SelectedService)
 	profile, isAudio := lookupServiceProfile(service)
+	if isAudio && s.cfg.AudioDisabled {
+		// Gateway chỉ video: báo lỗi để DCSF biết đã gửi dịch vụ audio nhầm gateway (không 200 {}).
+		zap.L().Warn("dcsf→dcas: audio service rejected, audio.enabled=false",
+			zap.String("call_id", callID), zap.String("service", event.SelectedService))
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "service " + event.SelectedService + " is not supported by this gateway (audio.enabled=false)"})
+		return
+	}
 	videoSvc, isVideo := s.cfg.VideoServices[service]
 	isVideo = isVideo && videoSvc.Enabled
 	if !isAudio && !isVideo {

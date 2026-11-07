@@ -986,6 +986,7 @@ Gom PCM frame nhỏ thành chunk phù hợp để gửi AI.
 
 ```yaml
 audio:
+  enabled: true              # false: gateway chỉ video — ANSWER speech_to_text/realtime_translation → 400; ai.grpc_target phải rỗng
   output_sample_rate: 16000
   output_channels: 1
   chunk_ms: 500
@@ -1792,6 +1793,7 @@ pipeline:
   packet_time_ms: 20
 
 audio:
+  enabled: true              # false: gateway chỉ video — ANSWER speech_to_text/realtime_translation → 400; ai.grpc_target phải rỗng
   output_sample_rate: 16000
   output_channels: 1
   chunk_ms: 500

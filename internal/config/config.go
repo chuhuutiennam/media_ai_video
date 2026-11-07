@@ -10,6 +10,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -138,6 +139,9 @@ type PipelineSection struct {
 
 // AudioSection cấu hình output audio format và chunk size.
 type AudioSection struct {
+	// Enabled (mặc định true): nhận dịch vụ audio (speech_to_text, realtime_translation). false:
+	// gateway chỉ video — ANSWER dịch vụ audio trả 400, không tạo session; ai.grpc_target phải rỗng.
+	Enabled          bool   `yaml:"enabled"`
 	OutputSampleRate int    `yaml:"output_sample_rate"`
 	OutputChannels   int    `yaml:"output_channels"`
 	ChunkMs          int    `yaml:"chunk_ms"`
@@ -291,6 +295,7 @@ func Default() GatewayConfig {
 			JitterOutQueueSize: 16,
 		},
 		Audio: AudioSection{
+			Enabled:          true,
 			OutputSampleRate: 16000,
 			OutputChannels:   1,
 			ChunkMs:          100,
@@ -411,6 +416,9 @@ func Load(path string) (GatewayConfig, error) {
 	}
 	if err := cfg.validateAnswerDeadline(); err != nil {
 		return GatewayConfig{}, err
+	}
+	if !cfg.Audio.Enabled && strings.TrimSpace(cfg.AI.GRPCTarget) != "" {
+		return GatewayConfig{}, fmt.Errorf("audio.enabled=false: ai.grpc_target (audio AI) must be empty, got %q", cfg.AI.GRPCTarget)
 	}
 	if cfg.Video.Gesture.Enabled {
 		hasGestureWorker := cfg.Video.AI.EngineTarget != ""
@@ -582,6 +590,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 
 		VideoReadinessRequiresAI: c.Video.AI.ReadinessRequiresAI,
 		RTPEvenPorts:             c.RTP.EvenPorts,
+		AudioDisabled:            !c.Audio.Enabled,
 	}
 }
 

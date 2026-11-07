@@ -165,6 +165,10 @@ func main() {
 			zap.Duration("keepalive_time", kaTime),
 			zap.Duration("keepalive_timeout", kaTimeout),
 		)
+	} else if !cfg.Audio.Enabled {
+		// Gateway chỉ video: ANSWER dịch vụ audio trả 400 (controlplane), không có AI audio.
+		aiDialer = ai.NullDialer{}
+		zap.L().Info("audio services disabled (audio.enabled=false) — ANSWER speech_to_text/realtime_translation → 400")
 	} else {
 		// Dev/smoke-test mode: pipeline chạy đầy đủ nhưng không có transcript.
 		aiDialer = ai.NullDialer{}

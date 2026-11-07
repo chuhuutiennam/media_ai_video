@@ -131,6 +131,10 @@ trả lỗi.
 
 Dịch vụ audio không mở video kể cả khi `bearerCapability: VIDEO`.
 
+Gateway chỉ video (`audio.enabled: false`, các config `gateway-video-*.yaml`): `speech_to_text` /
+`realtime_translation` trả **400** `{"error":"service <tên> is not supported by this gateway (audio.enabled=false)"}`,
+không tạo session, không cấp cổng — để DCSF biết đã gửi dịch vụ audio nhầm gateway (khác dịch vụ lạ: 200 `{}`).
+
 **Mapping `selectedService` video** (danh mục `video.services`, mỗi dịch vụ **đúng một AI
 service** — xem [giai-phap-video-service-catalog.md](giai-phap-video-service-catalog.md)):
 
@@ -234,7 +238,7 @@ DCSF không nhận được gì. `open_timeout_ms: 0` tắt hạn chờ (AI khô
 
 | HTTP | Nguyên nhân |
 |---|---|
-| `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`) |
+| `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`); dịch vụ audio trên gateway chỉ video (`service <tên> is not supported by this gateway (audio.enabled=false)`) |
 | `409` | `callId` đã tồn tại trong session manager |
 | `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot hoặc mọi target mất kết nối (`no AI worker available for service <tên>`, `retry_after_ms: 3000`) |
 | `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`), kể cả hết hạn mở stream AI video (`... timed out after 5s ...`, `video.ai.open_timeout_ms`) |

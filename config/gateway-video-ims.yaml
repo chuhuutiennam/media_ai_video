@@ -13,7 +13,8 @@
 # Khác media_ai (audio) cần lưu ý:
 #   - Dịch vụ video 1 leg lấy callbackUrl của tAccess (media_ai lấy tCore) — DCSF đặt URL nhận
 #     kết quả video vào mediaResources.tAccess.callbackUrl. Xem docs/dcas-dcsf-signaling.md.
-#   - ai.grpc_target để trống: gateway này không phục vụ audio.
+#   - audio.enabled: false + ai.grpc_target để trống: gateway này không phục vụ audio; ANSWER
+#     speech_to_text/realtime_translation trả 400 để DCSF biết đã gửi nhầm gateway.
 #   - video.ai.stream_timeout_sec: 0 — stream AI video sống theo cuộc gọi (khác 0 = giới hạn cứng).
 #   - Khoá của media_ai mà repo này chưa có (bị bỏ qua nếu thêm vào): session.drain_timeout_ms,
 #     result.sink_queue_size, callback.preconnect_interval_sec, audio.resampler, log.trace,
@@ -71,9 +72,15 @@ pipeline:
   max_packet_late_ms:    200
   jitter_out_queue_size: 1024       # video: nhiều gói mỗi frame (media_ai audio dùng 32)
 
+# ── Audio: tắt ───────────────────────────────────────────────────────────────
+# Gateway chỉ video: ANSWER speech_to_text/realtime_translation trả 400
+# "service <tên> is not supported by this gateway (audio.enabled=false)", không tạo session.
+audio:
+  enabled: false
+
 # ── AI audio: không dùng ─────────────────────────────────────────────────────
 ai:
-  grpc_target: ''                   # để trống: gateway video không nối tới AI audio
+  grpc_target: ''                   # bắt buộc rỗng khi audio.enabled: false
   # AI video (mediapipe, gesture: gRPC Python) dùng chính sách PING mặc định của server (PING khi
   # stream rảnh dày hơn 5 phút/lần bị tính vi phạm, đủ số lần thì server đóng kết nối) — script E2E
   # cũng tắt vì lý do này. Chỉ bật lại (vd 30/10) khi AI server đã nới chính sách PING.

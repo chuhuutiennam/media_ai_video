@@ -721,6 +721,7 @@ def data_main(folder, action, *args):
             'pipeline': {'jitter_out_queue_size': 1024},
             # Shared pool also carries video RPCs. After a finite file finishes,
             # Python workers can reject idle PINGs while the PNG lab still drains.
+            'audio': {'enabled': False},  # gateway chỉ video: ANSWER dịch vụ audio → 400
             'ai': {'grpc_target': '', 'keepalive_time_sec': 0},
             'result': {'dispatcher_workers': callback_workers, 'queue_size': 4096,
                        'drop_partial_when_full': False, 'send_timeout_ms': dispatch_timeout_ms},

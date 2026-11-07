@@ -32,7 +32,10 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
 - `legs` trong `video.services` mặc định `tcore`; `legs: both` mới tạo thêm leg taccess.
 - Không có cổng/SDP audio cho dịch vụ video; `codec` rỗng và `sample_rate=0`.
 - `speech_to_text` / `realtime_translation` chỉ cấp audio PCMU/8000; **không** mở video
-  kể cả khi `bearerCapability=VIDEO`.
+  kể cả khi `bearerCapability=VIDEO`. Trên gateway chỉ video (`audio.enabled: false` — mọi
+  config `gateway-video-*.yaml` và config do `test-video-e2e.sh` sinh) hai dịch vụ này trả **400**
+  `service <tên> is not supported by this gateway (audio.enabled=false)`, không tạo session.
+  `audio.enabled: false` bắt buộc `ai.grpc_target: ''`.
 - AI của dịch vụ không còn slot, mọi target mất kết nối, hoặc không có worker riêng: **503**
   `no AI worker available for service <tên>`. Với `video.ai.failover: true` (mặc định), target
   có kết nối gRPC đang `TRANSIENT_FAILURE` bị bỏ qua khi chọn, và mở stream lỗi thì thử target

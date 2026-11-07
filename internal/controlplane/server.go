@@ -89,6 +89,10 @@ type ServerConfig struct {
 	// WebRTCEnabled bật/tắt WebRTC ingress. false → POST /v1/webrtc/offer trả 404.
 	WebRTCEnabled bool
 
+	// AudioDisabled (audio.enabled=false): gateway chỉ video — ANSWER dịch vụ audio trả 400,
+	// không tạo session. false (giá trị 0 của struct) = nhận dịch vụ audio như cũ.
+	AudioDisabled bool
+
 	// VideoEnabled bật/tắt xử lý video. false → dịch vụ video trả 400.
 	VideoEnabled bool
 
