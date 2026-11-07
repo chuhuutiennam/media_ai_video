@@ -225,6 +225,11 @@ Dịch vụ video 1 leg (mặc định, ví dụ `video_effects`). Không có fi
 
 **Lưu ý:** Response được flush ngay trước khi DCAS gửi CALL_CTRL (bước tiếp theo). DCSF không cần chờ CALL_CTRL để xử lý response ANSWER.
 
+**Thời gian trả lời:** ANSWER video mở stream AI đồng bộ; mỗi leg chờ tối đa `video.ai.open_timeout_ms`
+(mặc định 5000, gồm mọi lần thử target), hết hạn → 502. `Load` bắt buộc số leg × `open_timeout_ms` <
+`server.write_timeout_sec` (mặc định 10), vì response trễ hơn `write_timeout_sec` bị HTTP server bỏ và
+DCSF không nhận được gì. `open_timeout_ms: 0` tắt hạn chờ (AI không phản hồi có thể giữ ANSWER ~20s).
+
 **Lỗi** (body `{"error": "...", "retry_after_ms": N}`; `retry_after_ms` chỉ có ở một số lỗi 503):
 
 | HTTP | Nguyên nhân |
@@ -232,7 +237,7 @@ Dịch vụ video 1 leg (mặc định, ví dụ `video_effects`). Không có fi
 | `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`) |
 | `409` | `callId` đã tồn tại trong session manager |
 | `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot hoặc mọi target mất kết nối (`no AI worker available for service <tên>`, `retry_after_ms: 3000`) |
-| `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`) |
+| `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`), kể cả hết hạn mở stream AI video (`... timed out after 5s ...`, `video.ai.open_timeout_ms`) |
 | `500` | Lỗi mở RTP listener hoặc lỗi tạo session khác |
 
 ---
@@ -393,6 +398,11 @@ dcsf:
 
 server:
   public_url: "http://dcas-host:8080"   # dùng để build callbackUrl gửi trong CALL_CTRL
+  write_timeout_sec: 10                 # response ANSWER trễ hơn bị bỏ; > số leg × video.ai.open_timeout_ms
+
+video:
+  ai:
+    open_timeout_ms: 5000               # hạn chờ mở stream AI khi ANSWER (0 = không giới hạn)
 
 rtp:
   public_ip: "10.0.1.5"                 # IP trong SDP response ANSWER

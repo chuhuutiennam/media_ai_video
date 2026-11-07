@@ -3,7 +3,9 @@ package ai
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -73,6 +75,10 @@ type VideoRoutingDialer struct {
 	// Failover: mở stream lỗi thì thử worker khác cùng (dịch vụ, task), mỗi worker tối
 	// đa một lần. false = chỉ thử worker được chọn đầu tiên.
 	Failover bool
+	// OpenTimeout > 0: hạn chờ chung cho việc mở stream, gồm mọi lần thử worker. Kết nối gRPC
+	// đang CONNECTING tới máy không phản hồi làm NewStream chờ tới ~20s (MinConnectTimeout);
+	// ANSWER chờ bước này nên phải trả lời trước WriteTimeout của HTTP server. 0 = không giới hạn.
+	OpenTimeout time.Duration
 }
 
 // NewVideoRoutingDialer tạo VideoRoutingDialer.
@@ -92,6 +98,35 @@ func (d *VideoRoutingDialer) Dial(ctx context.Context, sessionID, streamID strin
 		}
 	}
 	service := streamCfg.SelectedService
+	if d.OpenTimeout <= 0 {
+		return d.dialWithFailover(ctx, sessionID, streamID, service, task, streamCfg)
+	}
+	// Chỉ giới hạn bước mở: context của stream kế thừa openCtx nên không dùng WithTimeout;
+	// mở xong thì dừng timer, stream sống theo ctx của session như cũ.
+	openCtx, cancel := context.WithCancel(ctx)
+	timer := time.AfterFunc(d.OpenTimeout, cancel)
+	client, err := d.dialWithFailover(openCtx, sessionID, streamID, service, task, streamCfg)
+	expired := !timer.Stop()
+	if err == nil && expired {
+		if closer, ok := client.(io.Closer); ok {
+			_ = closer.Close() // timer đã huỷ stream vừa mở; trả slot
+		}
+		err = context.Canceled
+	}
+	if err != nil {
+		cancel()
+		if expired && ctx.Err() == nil {
+			zap.L().Warn("ai: video stream open timed out", zap.String("session_id", sessionID), zap.String("service", service),
+				zap.String("task", task), zap.Duration("open_timeout", d.OpenTimeout), zap.Error(err))
+			return nil, fmt.Errorf("ai: open video stream %s/%s: timed out after %v: %w", service, task, d.OpenTimeout, err)
+		}
+		return nil, err
+	}
+	return client, nil
+}
+
+// dialWithFailover chọn worker và mở stream; lỗi thì (nếu Failover) thử worker khác.
+func (d *VideoRoutingDialer) dialWithFailover(ctx context.Context, sessionID, streamID, service, task string, streamCfg VideoStreamConfig) (VideoStreamClient, error) {
 	var tried []string
 	var lastErr error
 	for {

@@ -13,6 +13,7 @@ video:
   default_effect_type: bg_blur
   ai:
     max_active_streams: 12
+    open_timeout_ms: 4000   # blur_background legs: both → 2 × 4000ms < server.write_timeout_sec 10s
   services:
     Change_Background:
       legs: tcore

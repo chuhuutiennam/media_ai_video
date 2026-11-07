@@ -78,6 +78,9 @@ type ServerSection struct {
 	KeyFile            string `yaml:"key_file"`
 	MetricsAddr        string `yaml:"metrics_addr"` // "" = serve /metrics tại HTTPAddr
 	ShutdownTimeoutSec int    `yaml:"shutdown_timeout_sec"`
+	// WriteTimeoutSec: thời gian tối đa từ lúc đọc xong request tới lúc ghi xong response
+	// (http.Server.WriteTimeout). Response trễ hơn bị bỏ — client không nhận được gì. Mặc định 10.
+	WriteTimeoutSec int `yaml:"write_timeout_sec"`
 }
 
 // RTPSection cấu hình Raw RTP UDP ingress.
@@ -259,6 +262,7 @@ func Default() GatewayConfig {
 			HTTPAddr:           ":8080",
 			MetricsAddr:        "",
 			ShutdownTimeoutSec: 10,
+			WriteTimeoutSec:    10,
 		},
 		RTP: RTPSection{
 			ListenAddr:       ":5004",
@@ -351,6 +355,33 @@ func Default() GatewayConfig {
 	}
 }
 
+// validateAnswerDeadline: ANSWER mở stream AI video đồng bộ, mỗi leg chờ tối đa
+// video.ai.open_timeout_ms; tổng phải nhỏ hơn server.write_timeout_sec, nếu không response
+// (kể cả lỗi) bị HTTP server bỏ và DCSF không nhận được gì. open_timeout_ms = 0: không giới hạn
+// (chỉ cho phép khi chọn AI qua registry; Engine bắt buộc >= 1).
+func (c GatewayConfig) validateAnswerDeadline() error {
+	if c.Server.WriteTimeoutSec < 1 {
+		return fmt.Errorf("server.write_timeout_sec must be >= 1, got %d", c.Server.WriteTimeoutSec)
+	}
+	if c.Video.AI.OpenTimeoutMs < 0 {
+		return fmt.Errorf("video.ai.open_timeout_ms must be >= 0, got %d", c.Video.AI.OpenTimeoutMs)
+	}
+	if !c.Video.Enabled || c.Video.AI.OpenTimeoutMs == 0 {
+		return nil
+	}
+	legs := 1
+	for _, s := range c.ToVideoServices() {
+		if s.Enabled && !s.SingleLeg {
+			legs = 2
+		}
+	}
+	if legs*c.Video.AI.OpenTimeoutMs >= c.Server.WriteTimeoutSec*1000 {
+		return fmt.Errorf("video.ai.open_timeout_ms (%d) x video legs (%d) must be less than server.write_timeout_sec (%ds) so ANSWER can reply",
+			c.Video.AI.OpenTimeoutMs, legs, c.Server.WriteTimeoutSec)
+	}
+	return nil
+}
+
 // Load đọc YAML config tại path, merge lên Default().
 // Field thiếu trong YAML giữ nguyên giá trị Default.
 func Load(path string) (GatewayConfig, error) {
@@ -377,6 +408,9 @@ func Load(path string) (GatewayConfig, error) {
 	}
 	if cfg.Video.AI.ReadinessRequiresAI && (!cfg.Video.Enabled || cfg.Video.AI.EngineTarget != "" || len(cfg.ToVideoWorkers()) == 0) {
 		return GatewayConfig{}, fmt.Errorf("video.ai.readiness_requires_ai requires video.enabled=true and AI targets from video.services, video.ai.workers or video.ai.grpc_target (not video.ai.engine_target)")
+	}
+	if err := cfg.validateAnswerDeadline(); err != nil {
+		return GatewayConfig{}, err
 	}
 	if cfg.Video.Gesture.Enabled {
 		hasGestureWorker := cfg.Video.AI.EngineTarget != ""
@@ -530,7 +564,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		CertFile:               c.Server.CertFile,
 		KeyFile:                c.Server.KeyFile,
 		ReadTimeout:            10 * time.Second,
-		WriteTimeout:           10 * time.Second,
+		WriteTimeout:           time.Duration(c.Server.WriteTimeoutSec) * time.Second,
 		IdleTimeout:            60 * time.Second,
 		GatewayID:              c.Gateway.ID,
 		RTPPublicIP:            c.RTP.PublicIP,

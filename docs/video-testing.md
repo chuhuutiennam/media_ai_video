@@ -40,6 +40,10 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
   cuộc gọi được chọn lại sang target khác.
 - Cổng RTP trong ANSWER luôn chẵn (`rtp.even_ports`, mặc định `true`; `port_start` phải chẵn), cổng
   lẻ kế tiếp dành cho RTCP. Gói RTCP gửi vào cổng video bị bỏ (`media_ai_video_ingress_rtcp_dropped_total`).
+- ANSWER chờ mở stream AI tối đa `video.ai.open_timeout_ms` mỗi leg (mặc định 5000, gồm mọi lần thử
+  target); AI không phản hồi (SYN không trả lời) → 502 `... timed out after 5s ...` thay vì treo ~20s.
+  Số leg × `open_timeout_ms` phải nhỏ hơn `server.write_timeout_sec` (mặc định 10), nếu không gateway
+  không khởi động.
 - `video.ai.stream_timeout_sec` là giới hạn cứng thời gian sống của stream AI video (mặc định 300s):
   cuộc gọi dài hơn sẽ mất AI. Triển khai IMS đặt `0` — xem `config/gateway-video-ims.yaml`.
 - Nếu ANSWER có `callbackUrl`, gateway gửi `CALL_CTRL` (`actions=duplicate`) đến URL đó.

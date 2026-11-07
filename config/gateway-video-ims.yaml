@@ -40,6 +40,7 @@ server:
   cert_file: "/etc/tls/gateway.crt"     # cert do internal CA ký
   key_file:  "/etc/tls/gateway.key"
   metrics_addr: ":9090"                 # Prometheus trên cổng riêng
+  write_timeout_sec: 10                 # response trễ hơn bị bỏ (DCSF không nhận được gì); phải > số leg × video.ai.open_timeout_ms
 
 # ── Raw RTP — cổng riêng mỗi cuộc gọi ────────────────────────────────────────
 rtp:
@@ -100,6 +101,7 @@ video:
   ai:
     max_active_streams: 200         # mẫu — trần chung mọi dịch vụ, ≥ tổng max_streams các target
     stream_timeout_sec: 0           # 0 = stream AI sống theo cuộc gọi (mặc định 300 cắt AI sau 5 phút)
+    open_timeout_ms: 5000           # hạn chờ mở stream AI khi ANSWER (gồm mọi lần thử target); AI không phản hồi → 502 sau ≤ 5s
     max_retry: 3                    # AI lỗi giữa cuộc gọi → chọn lại target khác (bỏ qua target chết)
     retry_backoff_ms: 1000
     failover: true                  # bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác

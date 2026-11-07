@@ -222,13 +222,15 @@ func main() {
 			}
 			router := ai.NewVideoRoutingDialer(workerReg, grpcPool.VideoDialFunc())
 			router.Failover = cfg.Video.AI.Failover
+			router.OpenTimeout = time.Duration(cfg.Video.AI.OpenTimeoutMs) * time.Millisecond
 			if cfg.Video.AI.Failover {
 				workerReg.SetReachable(grpcPool.Reachable) // bỏ qua target đang lỗi kết nối khi chọn AI video
 			}
 			videoDialer = router
 			videoServiceRouting = true
 			zap.L().Info("video AI routing dialer active", zap.Int("worker_count", len(videoWorkers)),
-				zap.Bool("failover", cfg.Video.AI.Failover), zap.Bool("readiness_requires_ai", cfg.Video.AI.ReadinessRequiresAI))
+				zap.Bool("failover", cfg.Video.AI.Failover), zap.Bool("readiness_requires_ai", cfg.Video.AI.ReadinessRequiresAI),
+				zap.Duration("open_timeout", router.OpenTimeout), zap.Int("http_write_timeout_sec", cfg.Server.WriteTimeoutSec))
 		} else {
 			videoDialer = ai.NullVideoDialer{}
 			zap.L().Warn("no video AI workers configured — using NullVideoDialer")

@@ -48,6 +48,7 @@ video:
     max_retry: 0                  # > 0 khi một dịch vụ có nhiều target: AI lỗi giữa cuộc gọi thì chọn lại target khác
     failover: true                # (mặc định) bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác cùng dịch vụ
     readiness_requires_ai: false  # (mặc định) true: /health/ready 503 khi một dịch vụ đang bật không còn target kết nối được
+    open_timeout_ms: 5000         # (mặc định) hạn chờ mở stream AI khi ANSWER; 0 = không giới hạn; số leg × giá trị này < server.write_timeout_sec (mặc định 10)
   services:
     change_background:
       enabled: true
