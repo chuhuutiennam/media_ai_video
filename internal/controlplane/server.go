@@ -66,6 +66,9 @@ type ServerConfig struct {
 	RTPBindIP    string // local IP to bind per-session UDP sockets; "" = all interfaces
 	RTPPortStart int    // inclusive lower bound of the port pool
 	RTPPortEnd   int    // inclusive upper bound of the port pool
+	// RTPEvenPorts: chỉ cấp cổng chẵn, cổng lẻ kế tiếp dành cho RTCP (RFC 3550); RTPPortStart
+	// phải chẵn. false = cấp mọi cổng trong dải (hành vi cũ, giá trị 0 của struct).
+	RTPEvenPorts bool
 
 	// RegistryTTL là thời gian tối đa một gateway node được coi là fresh sau lần heartbeat cuối.
 	// 0 → sử dụng mặc định 30s.
@@ -264,8 +267,12 @@ func NewServer(
 ) *Server {
 	var portAlloc *PortAllocator
 	if cfg.RTPPortStart > 0 {
+		newAlloc := NewPortAllocator
+		if cfg.RTPEvenPorts {
+			newAlloc = NewEvenPortAllocator
+		}
 		var err error
-		portAlloc, err = NewPortAllocator(cfg.RTPPortStart, cfg.RTPPortEnd)
+		portAlloc, err = newAlloc(cfg.RTPPortStart, cfg.RTPPortEnd)
 		if err != nil {
 			panic("controlplane: invalid RTP port range: " + err.Error())
 		}

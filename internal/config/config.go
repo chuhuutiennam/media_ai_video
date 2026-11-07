@@ -88,6 +88,9 @@ type RTPSection struct {
 	PortStart        int    `yaml:"port_start"`
 	PortEnd          int    `yaml:"port_end"`
 	SocketReadBuffer int    `yaml:"socket_read_buffer"`
+	// EvenPorts (mặc định true): chỉ cấp cổng chẵn trong [port_start, port_end], cổng lẻ kế
+	// tiếp dành cho RTCP (RFC 3550) → số cổng dùng được = một nửa dải; port_start phải chẵn.
+	EvenPorts bool `yaml:"even_ports"`
 }
 
 // WebRTCSection cấu hình WebRTC ingress và ICE.
@@ -260,6 +263,7 @@ func Default() GatewayConfig {
 		RTP: RTPSection{
 			ListenAddr:       ":5004",
 			SocketReadBuffer: 4 * 1024 * 1024,
+			EvenPorts:        true,
 		},
 		WebRTC: WebRTCSection{
 			Enabled:     true,
@@ -358,6 +362,9 @@ func Load(path string) (GatewayConfig, error) {
 	defer f.Close()
 	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
 		return GatewayConfig{}, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if cfg.RTP.EvenPorts && cfg.RTP.PortStart > 0 && cfg.RTP.PortStart%2 != 0 {
+		return GatewayConfig{}, fmt.Errorf("rtp.port_start must be even when rtp.even_ports=true (RTP even, RTCP = RTP+1), got %d", cfg.RTP.PortStart)
 	}
 	if v := cfg.AI.ReconnectMaxBackoffMs; v != 0 && (v < 1000 || v > 120000) {
 		return GatewayConfig{}, fmt.Errorf("ai.reconnect_max_backoff_ms must be 0 (gRPC default) or 1000..120000, got %d", v)
@@ -540,6 +547,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		VideoServices:          c.ToVideoServices(),
 
 		VideoReadinessRequiresAI: c.Video.AI.ReadinessRequiresAI,
+		RTPEvenPorts:             c.RTP.EvenPorts,
 	}
 }
 

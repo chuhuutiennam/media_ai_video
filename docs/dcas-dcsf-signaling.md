@@ -391,7 +391,16 @@ dcsf:
       port: 8080
   call_control_timeout_ms: 30000
 
-gateway:
+server:
   public_url: "http://dcas-host:8080"   # dùng để build callbackUrl gửi trong CALL_CTRL
-  rtp_public_ip: "10.0.1.5"             # IP trong SDP response ANSWER
+
+rtp:
+  public_ip: "10.0.1.5"                 # IP trong SDP response ANSWER
+  port_start: 20000                     # phải chẵn khi even_ports: true
+  port_end: 29999
+  even_ports: true                      # (mặc định) cổng RTP trong ANSWER luôn chẵn; cổng lẻ kế tiếp dành cho RTCP
 ```
+
+Cấu hình mẫu triển khai IMS cho dịch vụ video: [config/gateway-video-ims.yaml](../config/gateway-video-ims.yaml).
+Cổng video chỉ nhận RTP; gói RTCP gửi vào cổng này bị bỏ (metric
+`media_ai_video_ingress_rtcp_dropped_total`).

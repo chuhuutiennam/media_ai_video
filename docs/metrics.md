@@ -155,7 +155,7 @@ Theo dõi pool port UDP dành riêng cho từng session (`source_type=raw_rtp`).
 | Metric | Type | Ý nghĩa |
 |--------|------|---------|
 | `media_ai_rtp_ports_available` | Gauge | Số port UDP còn trống trong pool. |
-| `media_ai_rtp_ports_total` | Gauge | Tổng port trong pool (`rtp_port_end - rtp_port_start + 1`). Không đổi theo thời gian. |
+| `media_ai_rtp_ports_total` | Gauge | Tổng port trong pool. `rtp.even_ports: true` (mặc định): số cổng chẵn trong dải, `(port_end - port_start)/2 + 1`; `false`: `port_end - port_start + 1`. Không đổi theo thời gian. |
 
 **Cách dùng:**
 - `rtp_ports_available / rtp_ports_total` → % còn trống; alert khi < 20%.
@@ -272,7 +272,7 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
 | Field | Ý nghĩa |
 |-------|---------|
 | `per_session_open` | Số port UDP đang cấp phát = số session đang dùng per-session RTP port |
-| `per_session_capacity` | Tổng số port trong pool (`rtp_port_end - rtp_port_start + 1`); `0` nếu pool không cấu hình |
+| `per_session_capacity` | Tổng số port trong pool (chỉ cổng chẵn khi `rtp.even_ports: true` — mặc định); `0` nếu pool không cấu hình |
 | `shared_ingress` | `true` nếu shared UDP ingress (`:5004`) đang chạy |
 
 ## Video ingress và jitter riêng
@@ -285,6 +285,7 @@ Các counter `media_ai_jitter_*` cũ không bao phủ video jitter. Gateway bổ
 | ingress_parsed_total | RTP hợp lệ sau parse |
 | ingress_parse_errors_total | Datagram bị loại khi parse |
 | ingress_queue_dropped_total | Queue packet của session đầy |
+| ingress_rtcp_dropped_total | Gói RTCP (byte thứ 2 trong 192..223, RFC 5761) vào cổng video bị bỏ trước bộ giải mã; không tính vào `ingress_parse_errors_total` |
 | jitter_input_total | Số lần Push vào jitter, kể cả bị từ chối |
 | jitter_received_total | Được nhận vào heap jitter |
 | jitter_released_total | Được đưa ra output của jitter |

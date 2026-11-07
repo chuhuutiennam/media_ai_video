@@ -33,7 +33,7 @@ rtp:
   public_ip: "127.0.0.1"   # đổi thành IP lab server nếu gửi từ máy khác
   bind_ip: ""               # bind tất cả interface
   port_start: 40000
-  port_end:   40099         # 100 per-session ports
+  port_end:   40099         # 50 per-session ports (rtp.even_ports mặc định: chỉ cổng chẵn)
   socket_read_buffer: 2097152  # SO_RCVBUF 2 MiB — đủ cho lab (production dùng 4 MiB)
 
 session:

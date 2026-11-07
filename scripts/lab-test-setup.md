@@ -488,7 +488,7 @@ callback:
 rtp:
   public_ip: "127.0.0.1"           # đổi thành IP lab server nếu gửi từ máy khác
   port_start: 40000
-  port_end:   40099                 # pool 100 port = tối đa 50 cuộc gọi đồng thời
+  port_end:   40099                 # chỉ cấp cổng chẵn (rtp.even_ports mặc định): 50 port = tối đa 25 cuộc gọi audio 2 leg
 
 session:
   idle_timeout_sec: 60              # session tự đóng sau 60s không nhận packet

@@ -38,6 +38,10 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
   có kết nối gRPC đang `TRANSIENT_FAILURE` bị bỏ qua khi chọn, và mở stream lỗi thì thử target
   khác của cùng dịch vụ. Dịch vụ có nhiều target nên đặt `video.ai.max_retry` > 0 để AI lỗi giữa
   cuộc gọi được chọn lại sang target khác.
+- Cổng RTP trong ANSWER luôn chẵn (`rtp.even_ports`, mặc định `true`; `port_start` phải chẵn), cổng
+  lẻ kế tiếp dành cho RTCP. Gói RTCP gửi vào cổng video bị bỏ (`media_ai_video_ingress_rtcp_dropped_total`).
+- `video.ai.stream_timeout_sec` là giới hạn cứng thời gian sống của stream AI video (mặc định 300s):
+  cuộc gọi dài hơn sẽ mất AI. Triển khai IMS đặt `0` — xem `config/gateway-video-ims.yaml`.
 - Nếu ANSWER có `callbackUrl`, gateway gửi `CALL_CTRL` (`actions=duplicate`) đến URL đó.
   DCSF gửi `ctrl-result` về URL gateway cung cấp, chứa `mediaResources` và
   `callbackUrl` **riêng** của `tCore` / `tAccess`. Đây là URL nhận kết quả,

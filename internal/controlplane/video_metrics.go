@@ -16,6 +16,7 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 	write("ingress_parsed_total", "counter", "Valid video RTP datagrams parsed", s.videoIngress.Parsed.Load())
 	write("ingress_parse_errors_total", "counter", "Invalid video RTP datagrams", s.videoIngress.ParseErrors.Load())
 	write("ingress_queue_dropped_total", "counter", "Video RTP session queue drops", s.videoIngress.QueueDropped.Load())
+	write("ingress_rtcp_dropped_total", "counter", "Video RTCP datagrams dropped before decode", s.videoIngress.RTCPDropped.Load())
 	if source, ok := s.coord.(interface{ VideoJitterStats() jitter.Stats }); ok {
 		st := source.VideoJitterStats()
 		write("jitter_input_total", "counter", "Video packets passed to jitter", st.Pushed)

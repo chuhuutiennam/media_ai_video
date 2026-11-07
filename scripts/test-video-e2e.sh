@@ -493,6 +493,7 @@ def free_port(kind=socket.SOCK_STREAM):
 def udp_range():
     for _ in range(100):
         start = free_port(socket.SOCK_DGRAM)
+        start += start % 2  # rtp.even_ports (mặc định): port_start phải chẵn; 8 cổng = 4 cổng chẵn
         if start > 65528:
             continue
         sockets = []

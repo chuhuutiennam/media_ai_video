@@ -31,6 +31,23 @@ func NewPortAllocator(portStart, portEnd int) (*PortAllocator, error) {
 	return &PortAllocator{free: free, total: len(free)}, nil
 }
 
+// NewEvenPortAllocator creates a PortAllocator covering only even ports in [portStart, portEnd]
+// (theo media_ai). RFC 3550 §11: RTP dùng cổng chẵn, RTCP = RTP+1, nên cổng lẻ kế tiếp
+// không bao giờ được cấp cho cuộc gọi khác. portStart phải chẵn.
+func NewEvenPortAllocator(portStart, portEnd int) (*PortAllocator, error) {
+	if portStart <= 0 || portEnd < portStart {
+		return nil, fmt.Errorf("controlplane: invalid port range [%d, %d]", portStart, portEnd)
+	}
+	if portStart%2 != 0 {
+		return nil, fmt.Errorf("controlplane: portStart %d must be even (RFC 3550 RTP convention)", portStart)
+	}
+	free := make([]int, 0, (portEnd-portStart)/2+1)
+	for p := portStart; p <= portEnd; p += 2 {
+		free = append(free, p)
+	}
+	return &PortAllocator{free: free, total: len(free)}, nil
+}
+
 // Acquire takes a port from the pool. Returns ErrNoPortsAvailable if exhausted.
 func (a *PortAllocator) Acquire() (int, error) {
 	a.mu.Lock()

@@ -46,8 +46,8 @@ rtp:
   listen_addr:         ":5004"        # shared fallback (không dùng nếu port pool đủ)
   public_ip:           "10.10.1.5"   # IP của gateway nhìn từ SBC (thay giá trị thực)
   bind_ip:             "10.10.1.5"   # bind per-session socket vào interface cụ thể
-  port_start:          20000          # dải port RTP per-session
-  port_end:            29999          # 10000 port = 10000 session đồng thời tối đa
+  port_start:          20000          # dải port RTP per-session (phải chẵn khi rtp.even_ports: true — mặc định)
+  port_end:            29999          # chỉ cấp cổng chẵn: 5000 port = 5000 session (cổng lẻ kế tiếp dành cho RTCP)
   socket_read_buffer:  8388608        # 8 MiB — tránh mất packet burst từ SBC
 
 # ── WebRTC — tắt ─────────────────────────────────────────────────────────────

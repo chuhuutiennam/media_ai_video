@@ -207,6 +207,59 @@ func TestVideoPortListener_QueueFull_IncrementsDropCounter(t *testing.T) {
 	t.Error("gửi 50 packet vào queue cap 32 không đọc — VideoPacketQueueDropped vẫn = 0, kỳ vọng > 0")
 }
 
+// RTCP (SR, RR, BYE) gửi nhầm vào cổng video — vd RTCP của cuộc gọi khác về cổng RTP+1, hoặc
+// rtcp-mux — phải bị bỏ trước bộ giải mã. Không lọc thì pion parse SR thành RTP PT=72 (marker)
+// và đưa vào H264 parser.
+func TestVideoPortListener_DropsRTCP(t *testing.T) {
+	sess, cancel := makeTestVideoSession(t)
+	defer cancel()
+	ln, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.LocalAddr().(*net.UDPAddr).Port
+	ln.Close()
+	stats := &VideoIngressCounters{}
+	if err := StartVideoSessionListener(sess, "127.0.0.1", port, &fakeReleaser{}, stats); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("udp", "127.0.0.1:"+itoa(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	sr := append([]byte{0x80, 200, 0x00, 0x06}, make([]byte, 24)...) // Sender Report, 28 byte
+	var asRTP rtp.Packet
+	if err := asRTP.Unmarshal(sr); err != nil || asRTP.Version != 2 || len(asRTP.Payload) == 0 {
+		t.Fatalf("control: SR should look like valid RTP to pion (pt=%d): %v", asRTP.PayloadType, err)
+	}
+	rr := []byte{0x80, 201, 0x00, 0x01, 0, 0, 0, 1}                    // Receiver Report, không report block
+	bye := []byte{0x81, 203, 0x00, 0x01, 0, 0, 0, 1}                   // BYE
+	valid := buildRTP(9, 90000, 0xCAFEBABE, 96, true, []byte{0x65, 1}) // RTP H264 có marker: byte thứ 2 = 224
+	for _, data := range [][]byte{sr, rr, bye, valid} {
+		if _, err := conn.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case got := <-sess.VideoPacketQueue:
+		if got.Sequence != 9 || got.PayloadType != 96 {
+			t.Fatalf("first packet in queue is not the RTP packet: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RTP after RTCP was not received")
+	}
+	select {
+	case got := <-sess.VideoPacketQueue:
+		t.Fatalf("RTCP reached the video queue: %+v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if stats.Received.Load() != 4 || stats.RTCPDropped.Load() != 3 || stats.Parsed.Load() != 1 || stats.ParseErrors.Load() != 0 {
+		t.Fatalf("received=%d rtcp=%d parsed=%d errors=%d", stats.Received.Load(), stats.RTCPDropped.Load(), stats.Parsed.Load(), stats.ParseErrors.Load())
+	}
+}
+
 // RTP padding and header extensions must never reach the H264 parser. Invalid
 // version/truncated headers/padding are skipped, and datagrams >1500 bytes are
 // received intact (a truncated FU-A otherwise corrupts the complete frame).

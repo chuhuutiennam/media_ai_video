@@ -1,0 +1,162 @@
+# Media AI Gateway (video) — cấu hình triển khai IMS
+#
+# Ghép phần hạ tầng IMS của ../media_ai/config/gateway-ims.yaml (TLS control plane, RTP IP,
+# DCSF, callback MF, log, pcap) với danh mục dịch vụ video (config/gateway-video-services.yaml).
+#
+#   DCSF ──notify-event ANSWER──► Gateway  (dịch vụ video: chỉ tạo leg tcore, cấp 1 cổng video)
+#   DCSF ◄──CALL_CTRL duplicate── Gateway
+#   DCSF ──ctrl-result──────────► Gateway  (video 1 leg: kết quả về mediaResources.tAccess.callbackUrl)
+#
+#   MF ──RTP H264──► Gateway ──gRPC──► AI của dịch vụ (change_background → mediapipe, video_effects → gesture)
+#                       └──HTTP/2 callback (video.mask.result / video.gesture.result)──► MF
+#
+# Khác media_ai (audio) cần lưu ý:
+#   - Dịch vụ video 1 leg lấy callbackUrl của tAccess (media_ai lấy tCore) — DCSF đặt URL nhận
+#     kết quả video vào mediaResources.tAccess.callbackUrl. Xem docs/dcas-dcsf-signaling.md.
+#   - ai.grpc_target để trống: gateway này không phục vụ audio.
+#   - video.ai.stream_timeout_sec: 0 — stream AI video sống theo cuộc gọi (khác 0 = giới hạn cứng).
+#   - Khoá của media_ai mà repo này chưa có (bị bỏ qua nếu thêm vào): session.drain_timeout_ms,
+#     result.sink_queue_size, callback.preconnect_interval_sec, audio.resampler, log.trace,
+#     gateway.default_language, gateway.supported_target_languages, test_ai.
+#
+# Build (decoder H264 cần CGO + FFmpeg dev):
+#   CGO_ENABLED=1 go build -o bin/media-ai-gateway ./cmd/media-ai-gateway
+# Chạy:
+#   ./bin/media-ai-gateway --config config/gateway-video-ims.yaml
+#
+# Giá trị đánh dấu "mẫu" phải thay bằng giá trị thật của hạ tầng và năng lực AI.
+
+gateway:
+  name: "media-ai-gateway-video-ims"
+  id: "gw-video-ims-01"         # mẫu — mỗi node một ID riêng
+  raw_rtp_enabled: true
+  webrtc_enabled: false          # IMS dùng RTP thuần
+  mock_result_pump: false
+
+# ── Control plane (TLS) ──────────────────────────────────────────────────────
+server:
+  http_addr: ":8443"
+  public_url: "https://10.10.1.5:8443"  # mẫu — địa chỉ DCSF dùng để gửi ctrl-result về
+  cert_file: "/etc/tls/gateway.crt"     # cert do internal CA ký
+  key_file:  "/etc/tls/gateway.key"
+  metrics_addr: ":9090"                 # Prometheus trên cổng riêng
+
+# ── Raw RTP — cổng riêng mỗi cuộc gọi ────────────────────────────────────────
+rtp:
+  listen_addr:        ":5004"         # cổng dùng chung (dự phòng)
+  public_ip:          "10.10.1.5"     # mẫu — IP gateway nhìn từ MF, trả trong SDP ANSWER
+  bind_ip:            "10.10.1.5"     # mẫu — interface nhận RTP
+  port_start:         20000           # phải chẵn khi even_ports: true
+  port_end:           29999
+  even_ports:         true            # chỉ cấp cổng chẵn (5000 cổng); cổng lẻ kế tiếp dành cho RTCP
+  socket_read_buffer: 8388608         # chỉ áp dụng cổng dùng chung; cổng video từng cuộc gọi cố định 2 MiB
+
+webrtc:
+  stun_servers: []
+  turn_servers: []
+  nat1to1_ips:  []
+
+# ── Session ──────────────────────────────────────────────────────────────────
+# Dịch vụ video 1 leg: 1 cuộc gọi = 1 session + 1 cổng video.
+session:
+  max_sessions:             300     # mẫu — theo tổng năng lực AI video (admission từ chối ở 90%)
+  idle_timeout_sec:         60      # gói RTP video cũng tính là hoạt động
+  gc_interval_sec:          10
+  per_session_packet_queue: 1024    # một frame video gồm nhiều gói RTP (media_ai audio dùng 256)
+
+# ── Jitter (dùng chung cho audio và video) ───────────────────────────────────
+pipeline:
+  jitter_buffer_ms:      80         # mạng IMS jitter cao hơn LAN (theo media_ai)
+  max_packet_late_ms:    200
+  jitter_out_queue_size: 1024       # video: nhiều gói mỗi frame (media_ai audio dùng 32)
+
+# ── AI audio: không dùng ─────────────────────────────────────────────────────
+ai:
+  grpc_target: ''                   # để trống: gateway video không nối tới AI audio
+  # AI video (mediapipe, gesture: gRPC Python) dùng chính sách PING mặc định của server (PING khi
+  # stream rảnh dày hơn 5 phút/lần bị tính vi phạm, đủ số lần thì server đóng kết nối) — script E2E
+  # cũng tắt vì lý do này. Chỉ bật lại (vd 30/10) khi AI server đã nới chính sách PING.
+  keepalive_time_sec:    0
+  keepalive_timeout_sec: 10
+  watch_reconnect: true             # AI restart → nối lại ngay, log lost/restored
+  reconnect_max_backoff_ms: 5000    # AI sống lại → gateway nối lại trong ≤ ~5s
+
+# ── Video ────────────────────────────────────────────────────────────────────
+video:
+  enabled: true
+  worker_count: 8
+  job_queue_size: 1024
+  infer_width: 256
+  infer_height: 256
+  infer_fps: 5
+  frame_queue_size: 8
+  jpeg_quality: 80
+  default_effect_type: bg_replace
+  gesture:                          # thông số model gesture cho dịch vụ video_effects
+    infer_fps: 15
+    max_dimension: 640
+    max_hands: 4
+    frame_queue_size: 8
+  ai:
+    max_active_streams: 200         # mẫu — trần chung mọi dịch vụ, ≥ tổng max_streams các target
+    stream_timeout_sec: 0           # 0 = stream AI sống theo cuộc gọi (mặc định 300 cắt AI sau 5 phút)
+    max_retry: 3                    # AI lỗi giữa cuộc gọi → chọn lại target khác (bỏ qua target chết)
+    retry_backoff_ms: 1000
+    failover: true                  # bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác
+    readiness_requires_ai: false    # true: /health/ready 503 khi một dịch vụ không còn target kết nối được
+  services:
+    change_background:
+      enabled: true
+      legs: tcore
+      effect_type: bg_replace
+      ai:
+        task: video_segment         # AI segmentation (repo mediapipe)
+        targets: ['mediapipe-1.internal:50052', 'mediapipe-2.internal:50052']  # mẫu
+        max_streams: 50             # mẫu — mỗi target
+    video_effects:
+      enabled: true
+      legs: tcore
+      ai:
+        task: gesture_recognition   # AI gesture (repo gesture)
+        targets: ['gesture-1.internal:50053']  # mẫu
+        max_streams: 50             # mẫu — mỗi target
+
+# ── Result dispatcher ────────────────────────────────────────────────────────
+result:
+  dispatcher_workers:     32
+  queue_size:             16384
+  drop_partial_when_full: true
+  send_timeout_ms:        2000
+
+# ── HTTP/2 callback → MF ─────────────────────────────────────────────────────
+# Kết quả trước khi có ctrl-result đi về callback.url; sau ctrl-result đi về URL DCSF gửi
+# (video 1 leg: mediaResources.tAccess.callbackUrl; callbackUrls theo task lấy từ tCore).
+# url còn là đích pre-connect lúc khởi động — đặt trùng host với URL MF thật.
+callback:
+  url: "http://mf-callback.internal:8090"  # mẫu
+  timeout_ms:           2000
+  max_retry:            3
+  retry_backoff_ms:     500
+  read_idle_timeout_ms: 30000
+  ping_timeout_ms:      15000
+
+# ── DCSF (CALL_CTRL) ─────────────────────────────────────────────────────────
+dcsf:
+  hosts:
+    - host: "dcsf.ims.internal"     # mẫu
+      port: 9090
+  call_control_timeout_ms: 30000
+
+log:
+  level: "info"
+  monitor_interval_sec: 60
+
+pcap:
+  enabled: false
+  interface: eth0
+  output_dir: /var/log/media-ai-gateway/pcap
+  queue_size: 8192
+  snaplen: 65535
+  rotate:
+    max_size_mb: 100
+    max_files: 10

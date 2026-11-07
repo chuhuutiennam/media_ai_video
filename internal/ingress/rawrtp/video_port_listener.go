@@ -15,7 +15,14 @@ import (
 )
 
 // VideoIngressCounters counts this server's video UDP path, including rejected datagrams.
-type VideoIngressCounters struct{ Received, Parsed, ParseErrors, QueueDropped atomic.Uint64 }
+type VideoIngressCounters struct {
+	Received, Parsed, ParseErrors, QueueDropped atomic.Uint64
+	RTCPDropped                                 atomic.Uint64 // gói RTCP bị bỏ (không đưa vào bộ giải mã)
+}
+
+// isRTCP: byte thứ 2 trong 192..223 là RTCP (SR/RR/SDES/BYE/APP…, RFC 5761 §4). RTP video
+// (payload type động 96..127, kể cả khi bật marker) không rơi vào dải này.
+func isRTCP(b []byte) bool { return len(b) >= 2 && b[1] >= 192 && b[1] <= 223 }
 
 // StartVideoSessionListener bind một UDP socket riêng cho track VIDEO của
 // session tại bindIP:port, parse RTP (H264) và forward vào
@@ -60,6 +67,10 @@ func StartVideoSessionListener(
 				return
 			}
 			stats.Received.Add(1)
+			if isRTCP(buf[:n]) {
+				stats.RTCPDropped.Add(1)
+				continue
+			}
 			var packet pionrtp.Packet
 			if err := packet.Unmarshal(buf[:n]); err != nil || packet.Version != 2 || len(packet.Payload) == 0 {
 				stats.ParseErrors.Add(1)
