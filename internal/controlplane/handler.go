@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"runtime"
 	"slices"
 	"strings"
@@ -385,6 +386,16 @@ func (s *Server) ctrlResult(c *gin.Context) {
 				}
 			}
 		}
+		// URL sai (scheme lạ, thiếu host…) được nhận thì mọi kết quả sau đó gửi lỗi và mất →
+		// từ chối cả bản tin, không áp dụng phần nào. Rỗng giữ nghĩa cũ: callbackUrl rỗng = giữ URL
+		// hiện tại, callbackUrls[task] rỗng = quay về URL mặc định của session.
+		if field := invalidCtrlResultURL(req.MediaResources); field != "" {
+			// Không log URL: có thể chứa user:password (một trong các lý do bị từ chối).
+			zap.L().Warn("dcsf→dcas: ctrl-result rejected, invalid callback URL",
+				zap.String("call_id", id), zap.String("field", field))
+			c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid " + field + ": must be an absolute http(s) URL with host"})
+			return
+		}
 		taskUpdater, supportsTasks := s.coord.(interface {
 			UpdateTaskCallbackSink(string, string, string) *result.HTTPCallbackSink
 		})
@@ -474,6 +485,48 @@ func (s *Server) ctrlResult(c *gin.Context) {
 	resp := sessionToResponse(sess)
 	resp.SessionID = id
 	c.JSON(http.StatusOK, resp)
+}
+
+const maxCallbackURLLen = 2048
+
+// validCallbackURL chấp nhận URL http/https tuyệt đối có host, không kèm userinfo (theo media_ai).
+func validCallbackURL(raw string) bool {
+	if raw == "" || len(raw) > maxCallbackURLLen {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User != nil || u.Hostname() == "" {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+		return true
+	}
+	return false
+}
+
+// invalidCtrlResultURL trả tên field của URL không hợp lệ đầu tiên trong ctrl-result ("" nếu mọi
+// URL hợp lệ). Bỏ qua giá trị rỗng (có nghĩa riêng, xem ctrlResult).
+func invalidCtrlResultURL(mr *MediaResources) string {
+	for _, leg := range []struct {
+		name string
+		res  MediaResourceInfo
+	}{{"tCore", mr.TCore}, {"tAccess", mr.TAccess}} {
+		if u := leg.res.CallbackURL; u != "" && !validCallbackURL(u) {
+			return leg.name + ".callbackUrl"
+		}
+		tasks := make([]string, 0, len(leg.res.CallbackURLs))
+		for task := range leg.res.CallbackURLs {
+			tasks = append(tasks, task)
+		}
+		slices.Sort(tasks)
+		for _, task := range tasks {
+			if u := leg.res.CallbackURLs[task]; u != "" && !validCallbackURL(u) {
+				return leg.name + ".callbackUrls." + task
+			}
+		}
+	}
+	return ""
 }
 
 // deleteCallSession handles DELETE /v1/vonras/call-sessions/:callId.

@@ -2,6 +2,7 @@ package result
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,16 +196,29 @@ func (d *Dispatcher) dispatch(ctx context.Context, r pipeline.RecognitionResult)
 			return // dispatcher shutting down
 		}
 		err := sink.Send(ctx, r)
+		httpSink, isHTTP := sink.(*HTTPCallbackSink)
 		if err != nil {
 			d.sendErrors.Add(1)
-			zap.L().Debug("result: sink send error",
-				zap.String("session_id", r.SessionID),
-				zap.String("sink_type", sink.Type()),
-				zap.String("kind", r.Kind),
-				zap.Bool("is_final", r.IsFinal),
-				zap.Error(err),
-			)
+			// Callback bắt đầu lỗi: Warn một lần (thấy được ở log level info); các lần lỗi tiếp theo
+			// chỉ Debug để không tràn log khi MF chết. Metric dispatcher_send_errors_total đếm mọi lần.
+			if isHTTP && !errors.Is(err, context.Canceled) && httpSink.markFailed() {
+				zap.L().Warn("result: callback delivery failing",
+					zap.String("session_id", r.SessionID), zap.String("url", httpSink.URL),
+					zap.String("kind", r.Kind), zap.Error(err))
+			} else {
+				zap.L().Debug("result: sink send error",
+					zap.String("session_id", r.SessionID),
+					zap.String("sink_type", sink.Type()),
+					zap.String("kind", r.Kind),
+					zap.Bool("is_final", r.IsFinal),
+					zap.Error(err),
+				)
+			}
 		} else {
+			if isHTTP && httpSink.markDelivered() {
+				zap.L().Info("result: callback delivery recovered",
+					zap.String("session_id", r.SessionID), zap.String("url", httpSink.URL))
+			}
 			d.sent.Add(1)
 			if r.IsFinal {
 				d.sentFinal.Add(1)

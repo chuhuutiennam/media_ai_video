@@ -52,7 +52,9 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
 - Nếu ANSWER có `callbackUrl`, gateway gửi `CALL_CTRL` (`actions=duplicate`) đến URL đó.
   DCSF gửi `ctrl-result` về URL gateway cung cấp, chứa `mediaResources` và
   `callbackUrl` **riêng** của `tCore` / `tAccess`. Đây là URL nhận kết quả,
-  khác URL điều khiển trong ANSWER.
+  khác URL điều khiển trong ANSWER. URL trong ctrl-result (`callbackUrl`, `callbackUrls`) phải là
+  `http`/`https` tuyệt đối có host, không `user:password`; sai → 400, không áp dụng phần nào.
+  Kết quả sinh ra trước ctrl-result đi về `callback.url` và không có `mediaResources`.
 - Thiếu video config: 400; thiếu/hết port pool: 503; lỗi bind: 500;
   lỗi khởi tạo video pipeline/AI được báo đồng bộ: 502. Rollback đóng mọi
   session đã tạo, listener tự trả port sau khi đóng socket. Lỗi gRPC xảy ra sau khi

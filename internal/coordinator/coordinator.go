@@ -454,8 +454,8 @@ func (c *Coordinator) pumpResults(sess *session.Session, input <-chan pipeline.R
 			if r.SourceType == "" {
 				r.SourceType = sess.SourceType
 			}
-			if r.MediaResources == nil && sess.MediaResources != nil {
-				r.MediaResources = sess.MediaResources
+			if r.MediaResources == nil {
+				r.MediaResources = sess.MediaResources() // nil khi chưa có ctrl-result
 			}
 			if r.IsVideoGesture() && r.GestureResult != nil {
 				g := r.GestureResult

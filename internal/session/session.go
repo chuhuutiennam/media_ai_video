@@ -33,20 +33,24 @@ const (
 // chúng được GC tự động khi mọi tham chiếu mất đi. Điều này tránh panic khi
 // producer vẫn còn đang ghi vào channel tại thời điểm close.
 type Session struct {
-	ID             string
-	SourceType     string // "raw_rtp" | "webrtc"
-	SSRC           uint32
-	PayloadType    uint8
-	Codec          string
-	SampleRate     int
-	Channels       int
-	Language       string
-	Task           string
-	CallbackURL    string
-	PeerID         string
-	TrackID        string
-	RemoteAddr     string                   // expected source UDP addr "ip:port"; used as fallback routing key
-	MediaResources *pipeline.MediaResources // H.248 termination info set via PATCH
+	ID          string
+	SourceType  string // "raw_rtp" | "webrtc"
+	SSRC        uint32
+	PayloadType uint8
+	Codec       string
+	SampleRate  int
+	Channels    int
+	Language    string
+	Task        string
+	CallbackURL string
+	PeerID      string
+	TrackID     string
+	RemoteAddr  string // expected source UDP addr "ip:port"; used as fallback routing key
+
+	// mediaResources: H.248 termination info từ ctrl-result. ctrl-result ghi trong khi result
+	// pump đọc ở mỗi kết quả → atomic (trước đây là field thường: data race). Dùng
+	// MediaResources() / SetMediaResources().
+	mediaResources atomic.Pointer[pipeline.MediaResources]
 
 	// Video track — chỉ khác rỗng khi call có m=video (bearerCapability
 	// VIDEO) và Control Plane cấp SSRC/port riêng cho video.
@@ -64,11 +68,11 @@ type Session struct {
 	// "video_segment" | "gesture_recognition". Rỗng = suy ra từ Task (xem coordinator).
 	VideoAITask string
 
-	PacketQueue chan pipeline.MediaPacket
-	AudioQueue  chan pipeline.AudioChunk
+	PacketQueue      chan pipeline.MediaPacket
+	AudioQueue       chan pipeline.AudioChunk
 	VideoPacketQueue chan pipeline.MediaPacket // nil nếu !VideoEnabled
 	VideoFrameQueue  chan pipeline.VideoFrame  // nil nếu !VideoEnabled
-	ResultQueue chan pipeline.RecognitionResult
+	ResultQueue      chan pipeline.RecognitionResult
 
 	// PacketQueueDropped đếm số RTP packet bị drop do sess.PacketQueue đầy
 	// từ per-session UDP listener (port_manager). Thread-safe.
@@ -96,6 +100,12 @@ type Session struct {
 	VideoMaskResultQueue chan pipeline.RecognitionResult
 	GestureResultQueue   chan pipeline.RecognitionResult
 }
+
+// MediaResources trả termination info hiện tại; nil khi chưa có ctrl-result. Goroutine-safe.
+func (s *Session) MediaResources() *pipeline.MediaResources { return s.mediaResources.Load() }
+
+// SetMediaResources thay termination info (ctrl-result). Goroutine-safe.
+func (s *Session) SetMediaResources(mr *pipeline.MediaResources) { s.mediaResources.Store(mr) }
 
 // SetRTPEgress đăng ký hàm gửi RTP egress cho session.
 // Được gọi bởi rawrtp.StartSessionListener sau khi biết remote addr của MF.

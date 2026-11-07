@@ -106,7 +106,9 @@ Theo dõi luồng kết quả nhận dạng (ASR) từ AI worker tới callback 
 **Cách dùng:**
 - `dispatcher_pushed_total - dispatcher_sent_total - result_queue_dropped_total` → số kết quả đang in-flight.
 - `result_queue_dropped_total` tăng → dispatcher queue bị tắc, callback endpoint phản hồi quá chậm.
-- `dispatcher_send_errors_total` tăng → callback URL không phản hồi hoặc trả về lỗi 5xx liên tục.
+- `dispatcher_send_errors_total` tăng → callback URL không phản hồi hoặc trả về lỗi 5xx liên tục. Log
+  (level info) có Warn `result: callback delivery failing` (kèm `url`) một lần khi một callback bắt đầu
+  lỗi và Info `result: callback delivery recovered` khi gửi lại được; lỗi lặp lại chỉ ở level debug.
 - `result_final_total` là số transcript hoàn chỉnh đã giao đến backend; đây là metric nghiệp vụ quan trọng nhất.
 
 ---

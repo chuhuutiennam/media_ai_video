@@ -145,7 +145,7 @@ func (c *CallbackHTTPClient) NewHTTPCallbackSink(rawURL string, maxRetry int) *H
 		RetryBackoff:   200 * time.Millisecond,
 		AttemptTimeout: c.attemptTimeout,
 		client:         c.client,
-		pool:         	c,
+		pool:           c,
 	}
 }
 
@@ -211,12 +211,19 @@ type HTTPCallbackSink struct {
 	AttemptTimeout time.Duration // per-attempt timeout; 0 = dùng client.Timeout
 	DeadLetter     Sink          // optional; nhận result khi hết retry
 	client         *http.Client
-	retries        atomic.Uint64 // tổng số lần retry đã thực hiện
-	pool 		   *CallbackHTTPClient // shared per-task transports, pooled across sessions
+	failing        atomic.Bool         // lần gửi gần nhất lỗi (dispatcher log Warn khi bắt đầu lỗi, Info khi hồi phục)
+	retries        atomic.Uint64       // tổng số lần retry đã thực hiện
+	pool           *CallbackHTTPClient // shared per-task transports, pooled across sessions
 }
 
 // Retries trả về tổng số lần retry đã thực hiện (không tính lần gửi đầu tiên).
 func (s *HTTPCallbackSink) Retries() uint64 { return s.retries.Load() }
+
+// markFailed ghi nhận một lần gửi lỗi; true nếu đây là lỗi đầu tiên sau khi đang gửi được.
+func (s *HTTPCallbackSink) markFailed() bool { return !s.failing.Swap(true) }
+
+// markDelivered ghi nhận một lần gửi thành công; true nếu trước đó đang lỗi (vừa hồi phục).
+func (s *HTTPCallbackSink) markDelivered() bool { return s.failing.Swap(false) }
 
 // NewHTTPCallbackSink tạo HTTPCallbackSink.
 // timeout áp dụng cho từng HTTP/2 request; maxRetry là số lần retry (không kể lần đầu).
@@ -234,7 +241,7 @@ func (c *CallbackHTTPClient) clientFor(r pipeline.RecognitionResult) *http.Clien
 		task = "gesture_recognition"
 	} else if r.IsVideoMask() {
 		task = "video_segment"
- 	}
+	}
 	if task == "" {
 		return c.client
 	}

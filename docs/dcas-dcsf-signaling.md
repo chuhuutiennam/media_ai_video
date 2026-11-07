@@ -330,11 +330,12 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
 
 | Field | Type | Mô tả |
 |---|---|---|
-| `callId` | string | ID cuộc gọi |
+| `callId` | string | ID cuộc gọi. DCAS dùng `{callId}` trên URL, không so với giá trị trong body |
 | `mediaResources.tCore.contextId` | string | H.248 context ID của tCore trên MF |
 | `mediaResources.tCore.termination.terminationId` | string | H.248 termination ID của tCore |
 | `mediaResources.tCore.termination.medias` | array | MediaInfo per TS29.176; DCAS giữ nguyên raw, không parse |
-| `mediaResources.tCore.callbackUrl` | string | URL DCAS POST ASR result cho tCore stream |
+| `mediaResources.tCore.callbackUrl` | string | URL DCAS POST ASR result cho tCore stream. Phải là URL `http`/`https` tuyệt đối, có host, không kèm `user:password`, tối đa 2048 ký tự; rỗng = giữ URL hiện tại |
+| `mediaResources.tCore.callbackUrls` | object | Tuỳ chọn: URL riêng theo task (`video_segment`, `gesture_recognition`), cùng quy tắc URL; giá trị rỗng = quay về URL mặc định của session |
 | `mediaResources.tAccess.*` | — | Tương tự cho tAccess stream |
 
 **Xử lý nội bộ của DCAS:**
@@ -346,6 +347,15 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
   `mediaResources` của cả tCore lẫn tAccess. `callbackUrls` (URL riêng theo task, xem
   [luong-xu-ly-video-realtime-rtpgw-ai-mf.md](luong-xu-ly-video-realtime-rtpgw-ai-mf.md))
   vẫn lấy từ **tCore**; `callbackUrls` đặt trong tAccess bị bỏ qua.
+- Kiểm tra trước, áp dụng sau: khoá `callbackUrls` lạ hoặc bất kỳ URL nào sai quy tắc trên →
+  **400**, không áp dụng phần nào (kết quả tiếp tục đi URL cũ). Trước đây URL sai (vd `ftp://…`)
+  vẫn được nhận và mọi kết quả sau đó gửi lỗi.
+- Kết quả AI sinh ra **trước** khi có ctrl-result đi về `callback.url` (cấu hình gateway) và
+  **không có** `mediaResources` (MF chưa biết termination). Sau ctrl-result mới có URL theo
+  termination và `mediaResources`.
+- Callback lỗi: log Warn `result: callback delivery failing` một lần khi bắt đầu lỗi và Info
+  `result: callback delivery recovered` khi gửi lại được (mỗi callback sink); các lần lỗi giữa
+  chừng chỉ tăng metric `media_ai_dispatcher_send_errors_total`.
 
 ### Response
 
@@ -370,7 +380,7 @@ DCAS đọc trường `cause` để log rõ nguyên nhân khi DCSF trả non-2xx
 
 | HTTP | Nguyên nhân |
 |---|---|
-| `400` | JSON không hợp lệ |
+| `400` | JSON không hợp lệ; `unsupported callbackUrls task: <khoá>`; `invalid <field>: must be an absolute http(s) URL with host` (vd `invalid tAccess.callbackUrl`) |
 | `404` | Không tìm thấy session cho `callId` |
 
 ---

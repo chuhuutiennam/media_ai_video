@@ -136,7 +136,7 @@ func TestVideoEffects_CtrlResultSingleLeg(t *testing.T) {
 	if !ok {
 		t.Fatal("tcore session missing")
 	}
-	mr := sess.MediaResources
+	mr := sess.MediaResources()
 	if sess.CallbackURL != "http://mf/results/tAccess" || mr == nil || mr.TCore == nil || mr.TAccess == nil ||
 		mr.TCore.TerminationID != "term-tCore" || mr.TAccess.TerminationID != "term-tAccess" {
 		t.Fatalf("tcore session: callback %q, resources %+v", sess.CallbackURL, mr)

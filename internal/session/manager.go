@@ -315,7 +315,7 @@ func (m *Manager) Update(id string, patch SessionPatch) (*Session, error) {
 		s.CallbackURL = patch.CallbackURL
 	}
 	if patch.MediaResources != nil {
-		s.MediaResources = patch.MediaResources
+		s.SetMediaResources(patch.MediaResources)
 	}
 	return s, nil
 }
