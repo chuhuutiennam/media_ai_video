@@ -93,6 +93,10 @@ type ServerConfig struct {
 	// mỗi dịch vụ đúng một AI task. Nguồn: video.services hoặc DefaultVideoServices.
 	VideoServices map[string]VideoService
 
+	// VideoReadinessRequiresAI: /health/ready trả 503 khi một dịch vụ video đang bật không còn
+	// target AI nào kết nối được (cần SetVideoWorkerRegistry + SetGRPCPool). Mặc định tắt.
+	VideoReadinessRequiresAI bool
+
 	// WebRTC configures the WebRTC ingress (Pion PeerConnection, ICE servers, NAT).
 	// Used to handle POST /v1/webrtc/offer.
 	WebRTC wrtc.Config

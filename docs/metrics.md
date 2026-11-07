@@ -214,8 +214,20 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
 {
   "ai_workers": [
     {
-      "addr": "127.0.0.1:50051",
-      "state": "READY"
+      "addr": "127.0.0.1:50052",
+      "state": "READY",
+      "active_streams": 6,
+      "latency": {"avg_first_result_ms": 0},
+      "services": ["change_background"],
+      "tasks": ["video_segment"]
+    },
+    {
+      "addr": "127.0.0.1:50054",
+      "state": "TRANSIENT_FAILURE",
+      "active_streams": 0,
+      "latency": {"avg_first_result_ms": 0},
+      "services": ["change_background"],
+      "tasks": ["video_segment"]
     }
   ],
   "callback": {
@@ -237,8 +249,10 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
 
 | Field | Ý nghĩa |
 |-------|---------|
-| `addr` | Địa chỉ AI worker đang có conn trong pool |
-| `state` | Trạng thái gRPC connection: `IDLE` (chưa dùng), `CONNECTING` (đang dial), `READY` (kết nối sẵn sàng), `TRANSIENT_FAILURE` (lỗi tạm thời, đang retry), `SHUTDOWN` (đã đóng) |
+| `addr` | Địa chỉ AI worker đang có conn trong pool (audio, Engine và mọi target AI video), sắp xếp theo địa chỉ |
+| `state` | Trạng thái gRPC connection: `IDLE` (chưa dùng), `CONNECTING` (đang dial), `READY` (kết nối sẵn sàng), `TRANSIENT_FAILURE` (lỗi tạm thời, đang retry), `SHUTDOWN` (đã đóng). Với `video.ai.failover: true`, target video ở `TRANSIENT_FAILURE`/`SHUTDOWN` không được chọn cho cuộc gọi mới |
+| `active_streams` | AI video: số slot đang giữ trên địa chỉ này; địa chỉ khác: tổng stream audio |
+| `services`, `tasks` | Chỉ có với AI video: dịch vụ (`selectedService`) và AI task dùng địa chỉ này. Không có `services` = worker kiểu cũ, phục vụ mọi dịch vụ |
 
 `state` là `CONNECTING` ngay sau startup và chuyển sang `READY` sau khi mock-ai-worker/AI worker chấp nhận TCP. Nếu AI worker down, state chuyển về `TRANSIENT_FAILURE` sau timeout.
 

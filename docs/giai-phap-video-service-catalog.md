@@ -23,6 +23,7 @@ sửa config, không build lại.
 | 7 | AI Engine (`video.ai.engine_target`) giữ là lựa chọn chung, tuân theo 1:1 (mỗi source một task); **chưa** đưa vào danh mục ở P1. |
 | 8 | (2026-11-06) AI service là repo riêng: `change_background` → [mediapipe](https://github.com/chuhuutiennam/mediapipe) (`../mediapipe`, :50052), dịch vụ gesture đổi tên thành **`video_effects`** → [gesture](https://github.com/chuhuutiennam/gesture) (`../gesture`, :50053). Thư mục `workers/` bỏ khỏi repo này; mock Go chuyển sang `internal/mockai`. AI task vẫn là `gesture_recognition`. |
 | 9 | (2026-11-06) `video_effects` **chỉ tạo leg tcore**, giống `change_background`. `legs` mặc định đổi thành `tcore` (cả `video.services` lẫn config cũ); `legs: both` vẫn giữ cho dịch vụ khai báo thêm. ctrl-result 1 leg giữ cách cũ: session tcore lấy `callbackUrl` từ tAccess, `callbackUrls` (override theo task) từ tCore; `callbackUrls` trong tAccess bị bỏ qua — ghi rõ trong docs cho DCSF. |
+| 10 | (2026-11-06) **Chọn AI theo kết nối.** Trước đây registry không biết kết nối gRPC: target chết có 0 stream nên luôn được chọn. Chạy thật với 1 target sống và 1 target chết: 7/8 ANSWER trả 502. Nay: (A) bỏ qua target đang lỗi kết nối khi kiểm tra slot lúc ANSWER và khi chọn worker; (B) mở stream lỗi thì thử target khác của cùng dịch vụ; (C) `/v1/connections` hiện target AI video kèm dịch vụ và task; `/health/ready` có tùy chọn báo dịch vụ mất AI. Bật/tắt bằng `video.ai.failover` (mặc định `true`) và `video.ai.readiness_requires_ai` (mặc định `false`). (D) Dịch vụ có nhiều target nên đặt `video.ai.max_retry` > 0: AI lỗi giữa cuộc gọi thì chọn lại target khác. |
 
 ## 3. Hiện trạng
 
@@ -135,11 +136,23 @@ flowchart LR
 - Hai dịch vụ trỏ cùng một địa chỉ (ví dụ một `mock-ai-worker` trong lab): **cho phép**;
   dùng chung kết nối gRPC (pool theo địa chỉ) nhưng giới hạn stream tách riêng.
 - Watch reconnect và `ai.reconnect_max_backoff_ms` tự áp dụng cho mọi target.
+- Chọn theo kết nối (quyết định 10), chỉ khi chọn AI qua registry (`video.services`,
+  `video.ai.workers`, `video.ai.grpc_target`), không áp dụng Engine:
+
+  | Khoá | Mặc định | Ý nghĩa |
+  | --- | --- | --- |
+  | `video.ai.failover` | `true` | Bỏ qua target có kết nối gRPC đang `TRANSIENT_FAILURE`/`SHUTDOWN` (`SharedConnPool.Reachable`, gắn vào registry bằng `SetReachable`); target `IDLE`/`CONNECTING`/`READY` vẫn được chọn. Mở stream lỗi thì trả slot và thử target khác của cùng dịch vụ (`VideoRoutingDialer.Failover`), mỗi target tối đa 1 lần; ctx bị huỷ thì dừng. `false` = hành vi cũ |
+  | `video.ai.readiness_requires_ai` | `false` | `/health/ready` trả 503 `{"reason":"video_service_unavailable","services":[...]}` khi một dịch vụ đang bật không còn target kết nối được. Để tắt mặc định vì not_ready làm k8s ngừng chuyển traffic vào gateway, kéo theo cả dịch vụ còn sống. Bật mà không có target qua registry (Engine, không có target) → `Load` báo lỗi |
+
+  Target chết sống lại: gRPC tự nối lại theo backoff (giới hạn bằng `ai.reconnect_max_backoff_ms`;
+  `0` = mặc định gRPC, tối đa 120s), khi `READY` thì target được chọn lại. Giữa cuộc gọi:
+  stream lỗi và `video.ai.max_retry` > 0 → chọn lại qua cùng cơ chế (bỏ qua target chết).
 
 ### 4.5 Admission theo dịch vụ
 
 `WorkerRegistry.HasVideoCapacity(service, task)` (chỉ đọc, không giữ slot). Trong
-`handleAnswer`, sau khi tra danh mục: không có worker phù hợp còn slot → **503**
+`handleAnswer`, sau khi tra danh mục: không có worker phù hợp còn slot và kết nối dùng được
+(quyết định 10) → **503**
 `{"error":"no AI worker available for service <tên>","retry_after_ms":3000}`. Slot vẫn được giữ lúc dial như hiện tại; nếu
 bị tranh mất giữa kiểm tra và dial, ANSWER rollback 502 như hành vi hiện có.
 Triển khai: kiểm tra nằm trong `handleAnswer`, bật bằng `Server.SetVideoWorkerRegistry`
@@ -228,6 +241,8 @@ WSL Ubuntu đã có FFmpeg dev và g++, **chưa có Go**.
 | Từ chối chế độ ghép | `--gesture-mode mock` không kèm `--gesture-only` → FAIL ngay ở preflight với thông báo 1 dịch vụ ↔ 1 AI |
 | Sau khi tách AI repo + đổi tên `video_effects` (2026-11-06) | Windows vet/test PASS; WSL `go vet`/`go test ./...` PASS (gồm `internal/mockai`); MF CTest PASS; 6 E2E mock PASS (service in kết quả là `video_effects`, emoji lấy từ `../gesture/assets/emoji`) |
 | E2E với **AI thật** (CPU, WSL, `mediapipe` 0.10.35) | `change_background` ↔ repo mediapipe :50052: **PASS** (305 packet, 30 mask; log mediapipe `inference session=…-tcore … latency≈5–50ms`). `video_effects` ↔ repo gesture :50053, `--require-gesture`, `wave_hand.mp4` 10s: **PASS** (1018 packet, 150 gesture/leg; log gesture `stream_open` cho tcore+taccess, `gesture_event … gesture=Wave`) |
+| Quyết định 10 — chạy thật trước khi sửa (commit 463927b, `change_background` 2 target: 52052 sống, 52054 không có tiến trình) | 8 ANSWER: 1×201 (52052), **7×502** (52054, `connection refused`) dù log gateway đã ghi `grpc connect failed` cho 52054; `video_effects` chỉ 1 target chết → 502 thay vì 503; `/health/ready` 200; `/v1/connections` `ai_workers: null` |
+| Quyết định 10 — sau khi sửa | Windows vet/test PASS. WSL: gofmt 11 file sửa sạch, `go vet`/`go test ./...` PASS, `-race` ai/controlplane/config PASS (test mới chạy lặp 5 lần), 2 E2E mock PASS. Chạy thật 4 pha: (1) 52054 và 52053 chết → 6/6 ANSWER `change_background` 201 vào 52052, `video_effects` 503 `retry_after_ms: 3000`, `/v1/connections` hiện 3 target kèm dịch vụ/task/trạng thái; (2) bật 52054 → log `connection restored down_ms=4512`, 4/4 ANSWER mới vào 52054 (tải thấp hơn); (3) `kill -9` 52054 rồi ANSWER ngay → 2/2 vào 52052 (gateway đã thấy lỗi kết nối trước khi ANSWER tới, nên nhánh thử target khác không chạy; nhánh này được kiểm bằng unit test gRPC thật `TestVideoRoutingSkipsDeadTargetRealServers`); (4) `readiness_requires_ai: true` → 503 `video_service_unavailable` `["video_effects"]`, bật 52053 → 200 và ANSWER `video_effects` 201 |
 | Sau quyết định 9 (`video_effects` chỉ leg tcore, `legs` mặc định `tcore`) | Windows vet/test PASS; WSL `go vet`/`go test ./...` PASS, gồm `TestVideoEffects_CtrlResultSingleLeg` (tcore nhận `callbackUrl` tAccess, resource cả 2 leg, `callbackUrls` lấy từ tCore). 6 E2E mock PASS: `video_effects` direct (`--require-gesture`, kể cả `wave_hand.mp4`) và qua Engine đều chỉ có `tcore_video_rtp_port`, MF `--legs 1`, 45 gesture ở tAccess. AI thật: `change_background` PASS (305 packet, 30 mask); `video_effects` ↔ repo gesture PASS (509 packet, 150 gesture ở tAccess; log gesture đúng 1 `stream_open` cho `…-tcore`, `gesture=Wave`) |
 
 ## 10. Ngoài phạm vi (giai đoạn sau)
@@ -235,5 +250,5 @@ WSL Ubuntu đã có FFmpeg dev và g++, **chưa có Go**.
 - Engine trong danh mục (`protocol: video_source`, mỗi dịch vụ một Engine).
 - Thông số model riêng theo dịch vụ (FPS, kích thước, `max_hands`).
 - `event_type` callback và metric có nhãn `service`.
-- Bỏ qua target đang mất kết nối khi chọn worker (dùng trạng thái watch).
+- ~~Bỏ qua target đang mất kết nối khi chọn worker (dùng trạng thái watch).~~ Đã làm (quyết định 10).
 - Dịch vụ cần giao thức AI mới, dịch vụ audio.

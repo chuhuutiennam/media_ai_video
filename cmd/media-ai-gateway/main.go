@@ -220,9 +220,15 @@ func main() {
 					zap.String("target", worker.Addr), zap.Strings("tasks", worker.Tasks), zap.Strings("services", worker.Services),
 					zap.Int("max_streams", worker.MaxStreams))
 			}
-			videoDialer = ai.NewVideoRoutingDialer(workerReg, grpcPool.VideoDialFunc())
+			router := ai.NewVideoRoutingDialer(workerReg, grpcPool.VideoDialFunc())
+			router.Failover = cfg.Video.AI.Failover
+			if cfg.Video.AI.Failover {
+				workerReg.SetReachable(grpcPool.Reachable) // bỏ qua target đang lỗi kết nối khi chọn AI video
+			}
+			videoDialer = router
 			videoServiceRouting = true
-			zap.L().Info("video AI routing dialer active", zap.Int("worker_count", len(videoWorkers)))
+			zap.L().Info("video AI routing dialer active", zap.Int("worker_count", len(videoWorkers)),
+				zap.Bool("failover", cfg.Video.AI.Failover), zap.Bool("readiness_requires_ai", cfg.Video.AI.ReadinessRequiresAI))
 		} else {
 			videoDialer = ai.NullVideoDialer{}
 			zap.L().Warn("no video AI workers configured — using NullVideoDialer")
@@ -253,12 +259,13 @@ func main() {
 	apiSrv.SetVideoMetrics(videoPool, videoAIMgr)
 	apiSrv.SetCallbackClient(callbackClient)
 	apiSrv.SetDCSFPool(dcsfPool)
-	// Wire WorkerRegistry và gRPC pool chỉ khi dùng RoutingDialer thực.
+	// Wire WorkerRegistry vào admission chỉ khi dùng RoutingDialer audio thực.
 	// NullDialer (dev mode): bỏ qua để admission không block vì "no_ai_worker".
 	if cfg.AI.GRPCTarget != "" {
 		apiSrv.SetWorkerRegistry(workerReg)
-		apiSrv.SetGRPCPool(grpcPool)
 	}
+	// /v1/connections và readiness video: mọi kết nối AI trong pool (audio, Engine, video).
+	apiSrv.SetGRPCPool(grpcPool)
 	if videoServiceRouting {
 		apiSrv.SetVideoWorkerRegistry(workerReg)
 	}

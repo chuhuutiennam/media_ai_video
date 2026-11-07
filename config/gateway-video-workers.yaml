@@ -42,6 +42,8 @@ video:
   ai:
     max_active_streams: 40
     max_retry: 0
+    failover: true                # (mặc định) bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử worker khác cùng task
+    readiness_requires_ai: false  # (mặc định) true: /health/ready 503 khi một dịch vụ video không còn target kết nối được
     workers:
       - id: segmentation-external
         grpc_target: '127.0.0.1:50052'

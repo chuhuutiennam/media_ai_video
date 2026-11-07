@@ -180,6 +180,11 @@ type VideoAISection struct {
 	OpenTimeoutMs      int                  `yaml:"open_timeout_ms"`
 	SendTimeoutMs      int                  `yaml:"send_timeout_ms"`
 	Workers            []VideoWorkerSection `yaml:"workers"` // Explicit task routes; overrides grpc_target when nonempty.
+
+	// Chỉ áp dụng khi chọn AI qua registry (video.services, video.ai.workers, video.ai.grpc_target);
+	// không áp dụng video.ai.engine_target.
+	Failover            bool `yaml:"failover"`              // mặc định true: bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác cùng dịch vụ
+	ReadinessRequiresAI bool `yaml:"readiness_requires_ai"` // mặc định false: /health/ready 503 khi một dịch vụ video đang bật không còn target kết nối được
 }
 
 // AISection cấu hình kết nối tới AI worker và gRPC stream.
@@ -303,6 +308,7 @@ func Default() GatewayConfig {
 				StreamTimeoutSec:   300,
 				MaxRetry:           3,
 				RetryBackoffMs:     1000,
+				Failover:           true,
 			},
 		},
 		AI: AISection{
@@ -361,6 +367,9 @@ func Load(path string) (GatewayConfig, error) {
 	}
 	if err := cfg.normalizeVideoWorkers(); err != nil {
 		return GatewayConfig{}, err
+	}
+	if cfg.Video.AI.ReadinessRequiresAI && (!cfg.Video.Enabled || cfg.Video.AI.EngineTarget != "" || len(cfg.ToVideoWorkers()) == 0) {
+		return GatewayConfig{}, fmt.Errorf("video.ai.readiness_requires_ai requires video.enabled=true and AI targets from video.services, video.ai.workers or video.ai.grpc_target (not video.ai.engine_target)")
 	}
 	if cfg.Video.Gesture.Enabled {
 		hasGestureWorker := cfg.Video.AI.EngineTarget != ""
@@ -529,6 +538,8 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 		EgressQueueFrames:      c.Session.PerSessionEgressQueue,
 		VideoEnabled:           c.Video.Enabled,
 		VideoServices:          c.ToVideoServices(),
+
+		VideoReadinessRequiresAI: c.Video.AI.ReadinessRequiresAI,
 	}
 }
 

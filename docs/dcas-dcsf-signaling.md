@@ -140,7 +140,7 @@ service** — xem [giai-phap-video-service-catalog.md](giai-phap-video-service-c
 | `video_effects` | H264/90000 | chỉ tcore; kết quả về `callbackUrl` tAccess của ctrl-result | `gesture_recognition` (repo AI gesture) |
 | dịch vụ khai báo thêm trong `video.services` | H264/90000 | theo `legs` (mặc định `tcore`) | theo `ai.task` |
 | dịch vụ tắt (`enabled: false`) | — | — | ACK 200 `{}`, không tạo session |
-| AI của dịch vụ hết slot / không có worker riêng | — | — | HTTP 503 `no AI worker available for service <tên>` |
+| AI của dịch vụ hết slot / mọi target mất kết nối / không có worker riêng | — | — | HTTP 503 `no AI worker available for service <tên>` |
 
 ### Response
 
@@ -231,7 +231,7 @@ Dịch vụ video 1 leg (mặc định, ví dụ `video_effects`). Không có fi
 |---|---|
 | `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`) |
 | `409` | `callId` đã tồn tại trong session manager |
-| `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot (`no AI worker available for service <tên>`) |
+| `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot hoặc mọi target mất kết nối (`no AI worker available for service <tên>`, `retry_after_ms: 3000`) |
 | `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`) |
 | `500` | Lỗi mở RTP listener hoặc lỗi tạo session khác |
 

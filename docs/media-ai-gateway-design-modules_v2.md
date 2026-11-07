@@ -2103,7 +2103,7 @@ PUT /v1/gateways/{id}/heartbeat
 
 ```http
 GET /health/live    — liveness probe (luôn 200)
-GET /health/ready   — readiness probe (503 khi quá tải / no AI worker)
+GET /health/ready   — readiness probe (503 khi quá tải / no AI worker; thêm video_service_unavailable khi bật video.ai.readiness_requires_ai)
 GET /metrics        — Prometheus text format
 GET /v1/stats       — aggregate stats JSON
 GET /v1/connections — trạng thái AI gRPC, callback H/2, RTP ports

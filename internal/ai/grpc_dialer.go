@@ -324,6 +324,25 @@ func (p *SharedConnPool) State(addr string) connectivity.State {
 	return conn.GetState()
 }
 
+// Reachable báo kết nối tới addr còn dùng được để mở stream mới: false khi gRPC đang ở
+// TRANSIENT_FAILURE (lần nối gần nhất thất bại, gRPC đang chờ backoff để thử lại) hoặc
+// SHUTDOWN. Chưa có kết nối, IDLE, CONNECTING, READY → true (stream mới tự kích hoạt kết nối).
+// Khi worker sống lại, gRPC tự nối lại theo backoff (ai.reconnect_max_backoff_ms) và
+// Reachable trở về true.
+func (p *SharedConnPool) Reachable(addr string) bool {
+	p.mu.Lock()
+	conn, ok := p.conns[addr]
+	p.mu.Unlock()
+	if !ok {
+		return true
+	}
+	switch conn.GetState() {
+	case connectivity.TransientFailure, connectivity.Shutdown:
+		return false
+	}
+	return true
+}
+
 // WatchAndReconnect theo dõi trạng thái kết nối tới addr. Block cho đến khi ctx bị
 // cancel hoặc conn bị Shutdown. Nên gọi dưới dạng goroutine sau Preconnect.
 //

@@ -180,8 +180,10 @@ type ConnectionsResponse struct {
 type AIWorkerConn struct {
 	Addr         string         `json:"addr"`
 	State        string         `json:"state"`          // IDLE | CONNECTING | READY | TRANSIENT_FAILURE | SHUTDOWN
-	ActiveStream int            `json:"active_streams"` // số gRPC stream đang mở
+	ActiveStream int            `json:"active_streams"` // AI video: slot đang giữ trên địa chỉ này; còn lại: tổng stream audio
 	Latency      AILatencyStats `json:"latency"`
+	Services     []string       `json:"services,omitempty"` // AI video: dịch vụ (selectedService) dùng địa chỉ này; rỗng = mọi dịch vụ (config cũ)
+	Tasks        []string       `json:"tasks,omitempty"`    // AI video: task trên địa chỉ này
 }
 
 // AILatencyStats là thống kê latency của AI worker.

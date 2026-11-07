@@ -338,6 +338,9 @@ paths:
         - `ai_stream_limit` — AI streams đạt max
         - `no_ai_worker` — không có AI worker nào khả dụng
         - `queue_full` — worker pool queue đầy
+        - `video_service_unavailable` — chỉ khi `video.ai.readiness_requires_ai: true`: một
+          dịch vụ video đang bật không còn target AI kết nối được; field `services` liệt kê
+          các dịch vụ đó
       operationId: healthReady
       responses:
         "200":

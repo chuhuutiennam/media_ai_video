@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -518,7 +519,44 @@ func (s *Server) healthReady(c *gin.Context) {
 		})
 		return
 	}
+	if s.cfg.VideoReadinessRequiresAI {
+		if down := s.videoServicesWithoutAI(); len(down) > 0 {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status":         "not_ready",
+				"reason":         "video_service_unavailable",
+				"services":       down,
+				"retry_after_ms": 3000,
+			})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
+}
+
+// videoServicesWithoutAI trả (đã sắp xếp) các dịch vụ video đang bật không còn target AI nào
+// kết nối được. Chỉ xét khi video chọn AI qua registry và có pool gRPC.
+func (s *Server) videoServicesWithoutAI() []string {
+	if !s.cfg.VideoEnabled || s.videoRegistry == nil || s.grpcPool == nil {
+		return nil
+	}
+	var down []string
+	for name, svc := range s.cfg.VideoServices {
+		if !svc.Enabled {
+			continue
+		}
+		alive := false
+		for _, w := range s.videoRegistry.VideoWorkers(name, svc.AITask) {
+			if s.grpcPool.Reachable(w.Addr) {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			down = append(down, name)
+		}
+	}
+	slices.Sort(down)
+	return down
 }
 
 // metrics handles GET /metrics — Prometheus text exposition format (version 0.0.4).
@@ -778,21 +816,51 @@ func (s *Server) stats(c *gin.Context) {
 	})
 }
 
+// describeVideoWorker bổ sung dịch vụ, task và số stream đang giữ cho địa chỉ là AI video
+// trong registry; địa chỉ không phải AI video giữ nguyên số stream audio.
+func (s *Server) describeVideoWorker(conn *AIWorkerConn) {
+	if s.videoRegistry == nil {
+		return
+	}
+	video, active := false, 0
+	for _, w := range s.videoRegistry.List() {
+		if w.Addr != conn.Addr || !slices.Contains(w.MediaTypes, "video") {
+			continue
+		}
+		video = true
+		active += w.ActiveStreams
+		conn.Services = append(conn.Services, w.Services...)
+		conn.Tasks = append(conn.Tasks, w.Tasks...)
+	}
+	if !video {
+		return
+	}
+	conn.ActiveStream = active
+	slices.Sort(conn.Services)
+	conn.Services = slices.Compact(conn.Services)
+	slices.Sort(conn.Tasks)
+	conn.Tasks = slices.Compact(conn.Tasks)
+}
+
 func (s *Server) connections(c *gin.Context) {
 	resp := ConnectionsResponse{}
 
 	// AI gRPC workers.
 	if s.grpcPool != nil {
 		aiSt := s.aiMgr.Stats()
-		for _, addr := range s.grpcPool.Addrs() {
-			resp.AIWorkers = append(resp.AIWorkers, AIWorkerConn{
+		addrs := s.grpcPool.Addrs()
+		slices.Sort(addrs)
+		for _, addr := range addrs {
+			conn := AIWorkerConn{
 				Addr:         addr,
 				State:        s.grpcPool.State(addr).String(),
 				ActiveStream: s.aiMgr.Count(),
 				Latency: AILatencyStats{
 					AvgFirstResultMs: aiSt.AvgFirstResultMs(),
 				},
-			})
+			}
+			s.describeVideoWorker(&conn)
+			resp.AIWorkers = append(resp.AIWorkers, conn)
 		}
 	}
 

@@ -45,7 +45,9 @@ video:
     frame_queue_size: 8
   ai:
     max_active_streams: 40        # giới hạn mặc định mỗi target khi services.*.ai.max_streams = 0
-    max_retry: 0
+    max_retry: 0                  # > 0 khi một dịch vụ có nhiều target: AI lỗi giữa cuộc gọi thì chọn lại target khác
+    failover: true                # (mặc định) bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác cùng dịch vụ
+    readiness_requires_ai: false  # (mặc định) true: /health/ready 503 khi một dịch vụ đang bật không còn target kết nối được
   services:
     change_background:
       enabled: true

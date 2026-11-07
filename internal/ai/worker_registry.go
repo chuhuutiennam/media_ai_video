@@ -17,6 +17,23 @@ type WorkerRegistry struct {
 	mu      sync.RWMutex
 	workers map[string]WorkerInfo
 	ttl     time.Duration // 0 = không expire
+
+	// reachable (nếu có) cho biết kết nối tới địa chỉ worker còn dùng được; worker video
+	// có kết nối hỏng bị bỏ qua khi chọn. nil = không xét kết nối. Không áp dụng cho audio.
+	reachable func(addr string) bool
+}
+
+// SetReachable gắn hàm kiểm tra kết nối (thường là SharedConnPool.Reachable) cho việc
+// chọn worker video: SelectVideoTask và HasVideoCapacity bỏ qua worker mà fn trả false.
+func (r *WorkerRegistry) SetReachable(fn func(addr string) bool) {
+	r.mu.Lock()
+	r.reachable = fn
+	r.mu.Unlock()
+}
+
+// usableVideo: worker không bị loại vì kết nối hỏng. Gọi dưới r.mu.
+func (r *WorkerRegistry) usableVideo(w WorkerInfo) bool {
+	return r.reachable == nil || r.reachable(w.Addr)
 }
 
 // servesVideo: worker phục vụ được dịch vụ service với AI task qua giao thức video cho trước.
@@ -29,13 +46,15 @@ func (w WorkerInfo) servesVideo(service, task, format, protocol string) bool {
 
 // SelectVideoTask requires explicit capabilities and atomically reserves a slot.
 // Empty/wildcard audio registrations must never be selected for a video RPC.
-// service là selectedService của cuộc gọi; worker gắn dịch vụ khác bị loại.
-func (r *WorkerRegistry) SelectVideoTask(service, task, format, protocol string) (WorkerInfo, error) {
+// service là selectedService của cuộc gọi; worker gắn dịch vụ khác bị loại, cũng như
+// worker có kết nối hỏng (SetReachable) và worker có ID trong exclude (đã thử và lỗi).
+func (r *WorkerRegistry) SelectVideoTask(service, task, format, protocol string, exclude ...string) (WorkerInfo, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var best *WorkerInfo
 	for _, w := range r.listFresh(time.Now()) {
-		if !w.servesVideo(service, task, format, protocol) || w.atCapacity() {
+		if !w.servesVideo(service, task, format, protocol) || w.atCapacity() ||
+			slices.Contains(exclude, w.ID) || !r.usableVideo(w) {
 			continue
 		}
 		if best == nil || w.loadScore() < best.loadScore() {
@@ -53,16 +72,31 @@ func (r *WorkerRegistry) SelectVideoTask(service, task, format, protocol string)
 }
 
 // HasVideoCapacity: còn worker fresh phục vụ (service, task) qua VideoStream/Segment (JPEG) với
-// slot trống. Chỉ đọc, không giữ slot — slot vẫn được giữ lúc dial (SelectVideoTask).
+// slot trống và kết nối dùng được. Chỉ đọc, không giữ slot — slot vẫn được giữ lúc dial
+// (SelectVideoTask).
 func (r *WorkerRegistry) HasVideoCapacity(service, task string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, w := range r.listFresh(time.Now()) {
-		if w.servesVideo(service, task, "jpeg", "video_segment") && !w.atCapacity() {
+		if w.servesVideo(service, task, "jpeg", "video_segment") && !w.atCapacity() && r.usableVideo(w) {
 			return true
 		}
 	}
 	return false
+}
+
+// VideoWorkers trả các worker fresh phục vụ (service, task) qua VideoStream/Segment (JPEG),
+// không xét slot hay kết nối. Dùng cho readiness và quan sát.
+func (r *WorkerRegistry) VideoWorkers(service, task string) []WorkerInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []WorkerInfo
+	for _, w := range r.listFresh(time.Now()) {
+		if w.servesVideo(service, task, "jpeg", "video_segment") {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 func (r *WorkerRegistry) ReleaseVideoTask(id string) {

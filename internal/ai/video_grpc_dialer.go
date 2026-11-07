@@ -70,6 +70,9 @@ type VideoRoutingDialer struct {
 	registry *WorkerRegistry
 	dialFn   VideoGRPCDialFunc
 	Task     string
+	// Failover: mở stream lỗi thì thử worker khác cùng (dịch vụ, task), mỗi worker tối
+	// đa một lần. false = chỉ thử worker được chọn đầu tiên.
+	Failover bool
 }
 
 // NewVideoRoutingDialer tạo VideoRoutingDialer.
@@ -89,18 +92,32 @@ func (d *VideoRoutingDialer) Dial(ctx context.Context, sessionID, streamID strin
 		}
 	}
 	service := streamCfg.SelectedService
-	worker, err := d.registry.SelectVideoTask(service, task, "jpeg", "video_segment")
-	if err != nil {
-		return nil, fmt.Errorf("ai: route video %s/%s: %w", service, task, err)
-	}
-	zap.L().Debug("ai: dialing video worker", zap.String("session_id", sessionID), zap.String("service", service),
-		zap.String("task", task), zap.String("worker_id", worker.ID), zap.String("worker_addr", worker.Addr))
-	client, err := d.dialFn(ctx, worker.Addr, sessionID, streamID, streamCfg)
-	if err != nil {
+	var tried []string
+	var lastErr error
+	for {
+		worker, err := d.registry.SelectVideoTask(service, task, "jpeg", "video_segment", tried...)
+		if err != nil {
+			if lastErr != nil {
+				return nil, lastErr // mọi worker còn chọn được đều đã thử và lỗi
+			}
+			return nil, fmt.Errorf("ai: route video %s/%s: %w", service, task, err)
+		}
+		zap.L().Debug("ai: dialing video worker", zap.String("session_id", sessionID), zap.String("service", service),
+			zap.String("task", task), zap.String("worker_id", worker.ID), zap.String("worker_addr", worker.Addr))
+		client, err := d.dialFn(ctx, worker.Addr, sessionID, streamID, streamCfg)
+		if err == nil {
+			return &reservedVideoClient{VideoStreamClient: client, registry: d.registry, worker: worker.ID}, nil
+		}
 		d.registry.ReleaseVideoTask(worker.ID)
-		return nil, fmt.Errorf("ai: dial video worker %s (%s): %w", worker.ID, worker.Addr, err)
+		lastErr = fmt.Errorf("ai: dial video worker %s (%s): %w", worker.ID, worker.Addr, err)
+		if !d.Failover || ctx.Err() != nil {
+			return nil, lastErr
+		}
+		tried = append(tried, worker.ID)
+		zap.L().Warn("ai: video worker dial failed, trying another worker", zap.String("session_id", sessionID),
+			zap.String("service", service), zap.String("task", task), zap.String("worker_id", worker.ID),
+			zap.String("worker_addr", worker.Addr), zap.Error(err))
 	}
-	return &reservedVideoClient{VideoStreamClient: client, registry: d.registry, worker: worker.ID}, nil
 }
 
 // grpcVideoStreamClient wraps gRPC ClientStream thành VideoStreamClient.

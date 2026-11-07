@@ -33,8 +33,11 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
 - Không có cổng/SDP audio cho dịch vụ video; `codec` rỗng và `sample_rate=0`.
 - `speech_to_text` / `realtime_translation` chỉ cấp audio PCMU/8000; **không** mở video
   kể cả khi `bearerCapability=VIDEO`.
-- AI của dịch vụ không còn slot (hoặc không có worker riêng): **503**
-  `no AI worker available for service <tên>`.
+- AI của dịch vụ không còn slot, mọi target mất kết nối, hoặc không có worker riêng: **503**
+  `no AI worker available for service <tên>`. Với `video.ai.failover: true` (mặc định), target
+  có kết nối gRPC đang `TRANSIENT_FAILURE` bị bỏ qua khi chọn, và mở stream lỗi thì thử target
+  khác của cùng dịch vụ. Dịch vụ có nhiều target nên đặt `video.ai.max_retry` > 0 để AI lỗi giữa
+  cuộc gọi được chọn lại sang target khác.
 - Nếu ANSWER có `callbackUrl`, gateway gửi `CALL_CTRL` (`actions=duplicate`) đến URL đó.
   DCSF gửi `ctrl-result` về URL gateway cung cấp, chứa `mediaResources` và
   `callbackUrl` **riêng** của `tCore` / `tAccess`. Đây là URL nhận kết quả,
