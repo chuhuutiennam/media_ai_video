@@ -203,6 +203,7 @@ type CallbackConn struct {
 // RTPConnSummary tóm tắt số lượng kết nối RTP.
 type RTPConnSummary struct {
 	PerSessionOpen     int  `json:"per_session_open"`     // số port đang cấp phát (= session đang dùng per-session port)
+	PerSessionCooling  int  `json:"per_session_cooling"`  // port đã trả, đang chờ hết rtp.port_reuse_delay_ms mới cấp lại
 	PerSessionCapacity int  `json:"per_session_capacity"` // tổng số port trong pool; 0 nếu pool không cấu hình
 	SharedIngress      bool `json:"shared_ingress"`       // true nếu shared UDP ingress đang chạy
 }

@@ -712,6 +712,10 @@ func (s *Server) metricsWrite(w io.Writer) {
 		fmt.Fprintf(w, "# TYPE media_ai_rtp_ports_available gauge\n")
 		fmt.Fprintf(w, "media_ai_rtp_ports_available %d\n", s.portAlloc.Available())
 
+		fmt.Fprintf(w, "# HELP media_ai_rtp_ports_cooling Released RTP ports waiting rtp.port_reuse_delay_ms before reuse\n")
+		fmt.Fprintf(w, "# TYPE media_ai_rtp_ports_cooling gauge\n")
+		fmt.Fprintf(w, "media_ai_rtp_ports_cooling %d\n", s.portAlloc.Cooling())
+
 		fmt.Fprintf(w, "# HELP media_ai_rtp_ports_total Total RTP ports in pool\n")
 		fmt.Fprintf(w, "# TYPE media_ai_rtp_ports_total gauge\n")
 		fmt.Fprintf(w, "media_ai_rtp_ports_total %d\n", s.portAlloc.Total())
@@ -939,11 +943,10 @@ func (s *Server) connections(c *gin.Context) {
 
 	// RTP connections.
 	if s.portAlloc != nil {
-		total := s.portAlloc.Total()
-		avail := s.portAlloc.Available()
 		resp.RTP = RTPConnSummary{
-			PerSessionOpen:     total - avail,
-			PerSessionCapacity: total,
+			PerSessionOpen:     s.portAlloc.InUse(),
+			PerSessionCooling:  s.portAlloc.Cooling(),
+			PerSessionCapacity: s.portAlloc.Total(),
 			SharedIngress:      s.ingress != nil,
 		}
 	} else {

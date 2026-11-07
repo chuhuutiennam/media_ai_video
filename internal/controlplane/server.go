@@ -69,6 +69,9 @@ type ServerConfig struct {
 	// RTPEvenPorts: chỉ cấp cổng chẵn, cổng lẻ kế tiếp dành cho RTCP (RFC 3550); RTPPortStart
 	// phải chẵn. false = cấp mọi cổng trong dải (hành vi cũ, giá trị 0 của struct).
 	RTPEvenPorts bool
+	// RTPPortReuseDelay: cổng vừa trả chỉ được cấp lại sau khoảng này (rtp.port_reuse_delay_ms),
+	// để RTP còn đến của cuộc gọi cũ không lọt vào cuộc gọi mới. 0 = cấp lại khi tới lượt (FIFO).
+	RTPPortReuseDelay time.Duration
 
 	// RegistryTTL là thời gian tối đa một gateway node được coi là fresh sau lần heartbeat cuối.
 	// 0 → sử dụng mặc định 30s.
@@ -280,6 +283,7 @@ func NewServer(
 		if err != nil {
 			panic("controlplane: invalid RTP port range: " + err.Error())
 		}
+		portAlloc.SetReuseDelay(cfg.RTPPortReuseDelay)
 	}
 
 	ttl := cfg.RegistryTTL
@@ -372,7 +376,7 @@ func (s *Server) routes() http.Handler {
 func (s *Server) selfInfo() GatewayInfo {
 	var usedPorts int
 	if s.portAlloc != nil {
-		usedPorts = s.portAlloc.Total() - s.portAlloc.Available()
+		usedPorts = s.portAlloc.InUse()
 	}
 	var audioQueueUsage float64
 	if cap := s.pool.QueueCap(); cap > 0 {

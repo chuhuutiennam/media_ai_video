@@ -18,6 +18,7 @@ rtp:
   public_ip: '127.0.0.1'
   port_start: 41000
   port_end: 41099
+  port_reuse_delay_ms: 5000  # (mặc định) cổng vừa trả chờ 5s mới cấp lại; 0 = tắt
 session:
   max_sessions: 20
   idle_timeout_sec: 600

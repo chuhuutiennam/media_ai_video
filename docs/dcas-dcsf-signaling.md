@@ -399,6 +399,23 @@ Idle            → Không nhận gói RTP quá session.idle_timeout_sec → DCA
 
 Nếu CALL_CTRL thất bại (non-2xx hoặc timeout), DCAS tự đóng các session của cuộc gọi mà không chờ DCSF.
 
+### DELETE
+
+`DELETE /v1/vonras/call-sessions/{callId}` → **204** khi đóng được ít nhất một session của cuộc gọi
+(`{callId}-tcore`, `{callId}-taccess`); **404** khi không còn session nào (gọi lần 2, callId lạ).
+DCAS trả lời ngay; việc dọn dẹp chạy song song và xong gần như tức thì (đo thật: session, stream AI,
+decoder, cổng và slot AI về 0 ngay sau 204):
+
+- Đóng cổng UDP của cuộc gọi; stream AI bị huỷ (không gửi EOS) và trả slot AI; gỡ decoder và callback.
+- Kết quả AI đang trên đường về lúc DELETE bị bỏ (không có bước xả như `session.drain_timeout_ms`
+  của media_ai); với video là tối đa ~1 kết quả.
+- **Cổng vừa trả không được cấp lại ngay** (`rtp.port_reuse_delay_ms`, mặc định 5000): cổng xếp
+  cuối hàng đợi và chỉ cấp lại sau 5s, để RTP còn đến của cuộc gọi cũ (MF chưa gỡ context) không lọt
+  vào cuộc gọi mới. Trước đây cổng vừa trả được cấp ngay cho cuộc gọi kế tiếp: đo thật cuộc gọi mới
+  nhận 100 gói RTP của cuộc gọi cũ trong 2s. Cổng đang chờ không tính là trống: dải cổng nhỏ + nhiều
+  cuộc gọi ngắn có thể gặp 503 (`service at capacity`, `retry_after_ms: 10000`) sớm hơn.
+- ANSWER lại cùng `callId` sau DELETE được chấp nhận (201) như cuộc gọi mới.
+
 ---
 
 ## Cấu hình liên quan

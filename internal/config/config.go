@@ -95,6 +95,10 @@ type RTPSection struct {
 	// EvenPorts (mặc định true): chỉ cấp cổng chẵn trong [port_start, port_end], cổng lẻ kế
 	// tiếp dành cho RTCP (RFC 3550) → số cổng dùng được = một nửa dải; port_start phải chẵn.
 	EvenPorts bool `yaml:"even_ports"`
+	// PortReuseDelayMs (mặc định 5000): cổng vừa trả (DELETE, idle, CALL_CTRL lỗi) chỉ được cấp
+	// lại sau N ms, cổng trả trước được cấp trước (FIFO) — RTP còn đến của cuộc gọi cũ không lọt
+	// vào cuộc gọi mới. Cổng đang chờ không tính là trống. 0 = tắt thời gian chờ (vẫn FIFO).
+	PortReuseDelayMs int `yaml:"port_reuse_delay_ms"`
 }
 
 // WebRTCSection cấu hình WebRTC ingress và ICE.
@@ -272,6 +276,7 @@ func Default() GatewayConfig {
 			ListenAddr:       ":5004",
 			SocketReadBuffer: 4 * 1024 * 1024,
 			EvenPorts:        true,
+			PortReuseDelayMs: 5000,
 		},
 		WebRTC: WebRTCSection{
 			Enabled:     true,
@@ -401,6 +406,9 @@ func Load(path string) (GatewayConfig, error) {
 	}
 	if cfg.RTP.EvenPorts && cfg.RTP.PortStart > 0 && cfg.RTP.PortStart%2 != 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_start must be even when rtp.even_ports=true (RTP even, RTCP = RTP+1), got %d", cfg.RTP.PortStart)
+	}
+	if cfg.RTP.PortReuseDelayMs < 0 {
+		return GatewayConfig{}, fmt.Errorf("rtp.port_reuse_delay_ms must be >= 0, got %d", cfg.RTP.PortReuseDelayMs)
 	}
 	if v := cfg.AI.ReconnectMaxBackoffMs; v != 0 && (v < 1000 || v > 120000) {
 		return GatewayConfig{}, fmt.Errorf("ai.reconnect_max_backoff_ms must be 0 (gRPC default) or 1000..120000, got %d", v)
@@ -590,6 +598,7 @@ func (c GatewayConfig) ToControlPlaneServerConfig() controlplane.ServerConfig {
 
 		VideoReadinessRequiresAI: c.Video.AI.ReadinessRequiresAI,
 		RTPEvenPorts:             c.RTP.EvenPorts,
+		RTPPortReuseDelay:        time.Duration(c.RTP.PortReuseDelayMs) * time.Millisecond,
 		AudioDisabled:            !c.Audio.Enabled,
 	}
 }

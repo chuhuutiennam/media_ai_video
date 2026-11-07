@@ -17,7 +17,8 @@ import (
 // Implemented by *controlplane.PortAllocator.
 type PortAllocator interface {
 	Total() int
-	Available() int
+	InUse() int   // đang cấp cho session
+	Cooling() int // đã trả, đang chờ rtp.port_reuse_delay_ms
 }
 
 // Monitor periodically logs connection info, key metrics, and AI latency via zap.
@@ -60,7 +61,7 @@ func (m *Monitor) emit() {
 	if m.SessionMgr != nil {
 		fields = append(fields,
 			zap.Int("sessions_active", m.SessionMgr.Count()),
-			zap.Int("sessions_max",    m.SessionMgr.MaxSessions()),
+			zap.Int("sessions_max", m.SessionMgr.MaxSessions()),
 		)
 	}
 
@@ -68,11 +69,11 @@ func (m *Monitor) emit() {
 	if m.AIMgr != nil {
 		st := m.AIMgr.Stats()
 		fields = append(fields,
-			zap.Int("ai_streams_active",       m.AIMgr.Count()),
-			zap.Int("ai_streams_max",          m.AIMgr.MaxStreams()),
-			zap.Uint64("ai_send_errors",       st.TotalSendErrors),
-			zap.Uint64("ai_recv_errors",       st.TotalRecvErrors),
-			zap.Uint64("ai_retries",           st.TotalRetries),
+			zap.Int("ai_streams_active", m.AIMgr.Count()),
+			zap.Int("ai_streams_max", m.AIMgr.MaxStreams()),
+			zap.Uint64("ai_send_errors", st.TotalSendErrors),
+			zap.Uint64("ai_recv_errors", st.TotalRecvErrors),
+			zap.Uint64("ai_retries", st.TotalRetries),
 			zap.Int64("ai_first_result_avg_ms", st.AvgFirstResultMs()),
 		)
 	}
@@ -81,11 +82,11 @@ func (m *Monitor) emit() {
 	if m.Pool != nil {
 		ps := m.Pool.Stats()
 		fields = append(fields,
-			zap.Uint64("pool_submitted",     ps.Submitted),
-			zap.Uint64("pool_processed",     ps.Processed),
-			zap.Uint64("pool_dropped",       ps.Dropped),
+			zap.Uint64("pool_submitted", ps.Submitted),
+			zap.Uint64("pool_processed", ps.Processed),
+			zap.Uint64("pool_dropped", ps.Dropped),
 			zap.Uint64("pool_decode_errors", ps.DecodeErrors),
-			zap.Int("pool_queue_len",        m.Pool.QueueLen()),
+			zap.Int("pool_queue_len", m.Pool.QueueLen()),
 		)
 	}
 
@@ -93,12 +94,12 @@ func (m *Monitor) emit() {
 	if m.Dispatcher != nil {
 		ds := m.Dispatcher.Stats()
 		fields = append(fields,
-			zap.Uint64("disp_sent",         ds.Sent),
-			zap.Uint64("disp_sent_final",   ds.SentFinal),
+			zap.Uint64("disp_sent", ds.Sent),
+			zap.Uint64("disp_sent_final", ds.SentFinal),
 			zap.Uint64("disp_sent_partial", ds.SentPartial),
-			zap.Uint64("disp_dropped",      ds.Dropped),
-			zap.Uint64("disp_send_errors",  ds.SendErrors),
-			zap.Int("disp_queue_len",       m.Dispatcher.QueueLen()),
+			zap.Uint64("disp_dropped", ds.Dropped),
+			zap.Uint64("disp_send_errors", ds.SendErrors),
+			zap.Int("disp_queue_len", m.Dispatcher.QueueLen()),
 		)
 	}
 
@@ -106,7 +107,7 @@ func (m *Monitor) emit() {
 	if m.GRPCPool != nil {
 		for _, addr := range m.GRPCPool.Addrs() {
 			fields = append(fields,
-				zap.String("ai_grpc_addr",  addr),
+				zap.String("ai_grpc_addr", addr),
 				zap.String("ai_grpc_state", m.GRPCPool.State(addr).String()),
 			)
 		}
@@ -116,8 +117,8 @@ func (m *Monitor) emit() {
 	if m.CallbackClient != nil {
 		st := m.CallbackClient.PreconnectState()
 		fields = append(fields,
-			zap.String("callback_url",       st.URL),
-			zap.Bool("callback_connected",   st.Connected),
+			zap.String("callback_url", st.URL),
+			zap.Bool("callback_connected", st.Connected),
 		)
 		if st.Error != "" {
 			fields = append(fields, zap.String("callback_error", st.Error))
@@ -126,11 +127,10 @@ func (m *Monitor) emit() {
 
 	// RTP port pool
 	if m.PortAlloc != nil {
-		total := m.PortAlloc.Total()
-		avail := m.PortAlloc.Available()
 		fields = append(fields,
-			zap.Int("rtp_ports_open",     total-avail),
-			zap.Int("rtp_ports_capacity", total),
+			zap.Int("rtp_ports_open", m.PortAlloc.InUse()),
+			zap.Int("rtp_ports_cooling", m.PortAlloc.Cooling()),
+			zap.Int("rtp_ports_capacity", m.PortAlloc.Total()),
 		)
 	}
 	fields = append(fields, zap.Bool("rtp_shared_ingress", m.SharedIngress))

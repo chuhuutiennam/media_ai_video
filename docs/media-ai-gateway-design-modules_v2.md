@@ -1765,6 +1765,7 @@ rtp:
   port_start: 0              # 0 = tắt per-session port pool; phải chẵn khi even_ports: true
   port_end: 0
   even_ports: true           # chỉ cấp cổng chẵn (RTP), cổng lẻ kế tiếp dành cho RTCP (RFC 3550)
+  port_reuse_delay_ms: 5000  # cổng vừa trả chờ N ms mới cấp lại (FIFO); 0 = tắt
   socket_read_buffer: 4194304  # SO_RCVBUF 4 MiB (shared ingress; cổng video per-session cố định 2 MiB)
 
 webrtc:

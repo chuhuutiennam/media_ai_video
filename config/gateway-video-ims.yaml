@@ -51,6 +51,7 @@ rtp:
   port_start:         20000           # phải chẵn khi even_ports: true
   port_end:           29999
   even_ports:         true            # chỉ cấp cổng chẵn (5000 cổng); cổng lẻ kế tiếp dành cho RTCP
+  port_reuse_delay_ms: 5000           # cổng vừa trả chờ 5s mới cấp lại (FIFO): RTP còn đến của cuộc gọi cũ không lọt vào cuộc gọi mới
   socket_read_buffer: 8388608         # chỉ áp dụng cổng dùng chung; cổng video từng cuộc gọi cố định 2 MiB
 
 webrtc:

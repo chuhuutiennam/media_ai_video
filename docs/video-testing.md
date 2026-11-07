@@ -43,6 +43,10 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
   cuộc gọi được chọn lại sang target khác.
 - Cổng RTP trong ANSWER luôn chẵn (`rtp.even_ports`, mặc định `true`; `port_start` phải chẵn), cổng
   lẻ kế tiếp dành cho RTCP. Gói RTCP gửi vào cổng video bị bỏ (`media_ai_video_ingress_rtcp_dropped_total`).
+- DELETE → 204 (404 nếu không còn session). Cổng vừa trả chờ `rtp.port_reuse_delay_ms` (mặc định 5000)
+  mới cấp lại, cổng trả trước cấp trước: cuộc gọi kế tiếp nhận cổng khác nên RTP còn đến của cuộc gọi
+  cũ không lọt vào. Cổng đang chờ hiện ở `/v1/connections` `per_session_cooling` và metric
+  `media_ai_rtp_ports_cooling`; dải cổng nhỏ trong lab có thể hết cổng (503) khi tạo/xoá liên tục.
 - ANSWER chờ mở stream AI tối đa `video.ai.open_timeout_ms` mỗi leg (mặc định 5000, gồm mọi lần thử
   target); AI không phản hồi (SYN không trả lời) → 502 `... timed out after 5s ...` thay vì treo ~20s.
   Số leg × `open_timeout_ms` phải nhỏ hơn `server.write_timeout_sec` (mặc định 10), nếu không gateway

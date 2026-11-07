@@ -156,7 +156,8 @@ Theo dõi pool port UDP dành riêng cho từng session (`source_type=raw_rtp`).
 
 | Metric | Type | Ý nghĩa |
 |--------|------|---------|
-| `media_ai_rtp_ports_available` | Gauge | Số port UDP còn trống trong pool. |
+| `media_ai_rtp_ports_available` | Gauge | Số port UDP cấp được ngay (không tính port đang chờ `rtp.port_reuse_delay_ms`). |
+| `media_ai_rtp_ports_cooling` | Gauge | Port đã trả (DELETE, idle, CALL_CTRL lỗi) đang chờ `rtp.port_reuse_delay_ms` (mặc định 5s) mới được cấp lại. |
 | `media_ai_rtp_ports_total` | Gauge | Tổng port trong pool. `rtp.even_ports: true` (mặc định): số cổng chẵn trong dải, `(port_end - port_start)/2 + 1`; `false`: `port_end - port_start + 1`. Không đổi theo thời gian. |
 
 **Cách dùng:**
@@ -239,6 +240,7 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
   },
   "rtp": {
     "per_session_open": 3,
+    "per_session_cooling": 1,
     "per_session_capacity": 100,
     "shared_ingress": true
   }
@@ -274,6 +276,7 @@ curl -s --http2-prior-knowledge http://gateway:8080/v1/connections | python3 -m 
 | Field | Ý nghĩa |
 |-------|---------|
 | `per_session_open` | Số port UDP đang cấp phát = số session đang dùng per-session RTP port |
+| `per_session_cooling` | Port đã trả, đang chờ `rtp.port_reuse_delay_ms` mới cấp lại (không tính vào `per_session_open`) |
 | `per_session_capacity` | Tổng số port trong pool (chỉ cổng chẵn khi `rtp.even_ports: true` — mặc định); `0` nếu pool không cấu hình |
 | `shared_ingress` | `true` nếu shared UDP ingress (`:5004`) đang chạy |
 
