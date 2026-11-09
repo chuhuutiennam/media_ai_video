@@ -2,8 +2,9 @@
 
 Trạng thái: **đã triển khai** (chốt và code 2026-11-09, nhánh `feat/video-jitter-observability`).
 Kết quả kiểm chứng ở §5.
-Phạm vi đợt này: **A** (jitter riêng cho video) và **D** (số liệu decoder). Chưa làm: **B**
-(reset khi đổi SSRC / seq nhảy lùi) và **C** (gửi PLI/FIR về MF).
+Phạm vi đợt này: **A** (jitter riêng cho video) và **D** (số liệu decoder). **B** (xử lý đổi
+SSRC / seq-timestamp bắt đầu lại giữa cuộc gọi) **không cần làm** với MF hiện tại (§6). Chưa làm:
+**C** (gửi PLI/FIR về MF).
 
 ## 1. Hiện trạng và kết quả đo
 
@@ -44,6 +45,7 @@ Nguyên nhân chính:
 | 5 | **Xoá** cờ `DropUntilIDROnLoss` / `drop_until_idr_on_loss` (không được dùng). Hành vi giữ nguyên: mất gói luôn chờ IDR. |
 | 6 | Làm trên worktree riêng từ HEAD (`bd50956`), nhánh `feat/video-jitter-observability`, không lẫn thay đổi chưa commit trên `main`. |
 | 7 | Thêm cờ `--drop-packets` cho `mock-video-rtp-sender` để chạy thật kịch bản mất gói. |
+| 8 | (2026-11-09) **Không làm B.** MF production: dùng một SSRC cố định cho mọi cuộc gọi; mỗi cuộc gọi gửi từ một cổng nguồn riêng; trong một cuộc gọi luôn giữ seq/timestamp liên tục, không bao giờ bắt đầu lại. Chi tiết và điều kiện xem lại ở §6. |
 
 ## 3. Thiết kế
 
@@ -132,9 +134,34 @@ Môi trường: WSL Ubuntu, Go 1.26.4, `CGO_ENABLED=1`, FFmpeg 7.1.1.
   khoảng nghỉ giữa 2 frame được kiểm bằng unit test (`TestSkipGaps_ReorderAfterInterFramePause`);
   sender chưa có tuỳ chọn đảo thứ tự gói.
 
-## 6. Chưa làm
+## 6. Không làm và chưa làm
 
-- **B**: khoá SSRC / phát hiện seq nhảy lùi → reset jitter + `decoder.Reset()`; timestamp tracker
-  xử lý timestamp lùi (hiện ra `TimestampMs` rác ~2e14).
+### 6.1 B: đổi SSRC / seq-timestamp bắt đầu lại — không cần với MF hiện tại
+
+Đo thật trên `main` (`de1e60b`): 1 cuộc gọi, gửi stream A (SSRC 1111) rồi stream B (SSRC 2222) vào
+cùng cổng, mỗi stream seq/timestamp gốc ngẫu nhiên, chạy 4 lần. 3/4 lần seq B "lùi" so với A →
+272/272 gói B bị jitter coi là trùng, 0 frame tới AI (kéo dài tới khi seq vượt mốc cũ, tối đa 32768
+gói). 1/4 lần seq "tiến" → bỏ qua khoảng trống, AI nhận đủ, nhưng `timestamp_ms` có thể là số rác
+(~2e14) do tracker C++ tràn số khi timestamp lùi.
+
+Không làm vì với MF production (xác nhận 2026-11-09):
+
+- MF dùng **một SSRC cố định cho mọi cuộc gọi** (đặt khi MF khởi động): SSRC không phân biệt được
+  cuộc gọi; **không** dùng SSRC để định tuyến hay khoá nguồn.
+- Mỗi cuộc gọi MF gửi từ **một cổng nguồn riêng**; gateway cũng mở **một cổng riêng** cho mỗi cuộc
+  gọi, cổng vừa trả chờ `rtp.port_reuse_delay_ms` (5 s) mới cấp lại → không có gói lạc từ cuộc gọi khác.
+- Trong một cuộc gọi MF **giữ seq/timestamp liên tục**, không bao giờ bắt đầu lại. Gateway không
+  nhận sự kiện media giữa cuộc gọi (chỉ BEGIN, ANSWER, ctrl-result, DELETE).
+
+Xem lại nếu đổi MF/SBC hoặc MF bắt đầu lại seq/timestamp trong cuộc gọi (vd giữ máy/tiếp tục,
+re-INVITE). Ràng buộc khi đó: mọi AI (`mediapipe` segmenter, `gesture` server, AI Engine, mock AI)
+bắt buộc `timestamp_ms` và `frame_id` tăng dần trong một stream; MF lab ghép kết quả theo
+`rtp_timestamp` gốc. Bản tối giản đã phác thảo: (1) jitter gặp 4 gói liên tiếp có seq lùi quá 1024
+thì đếm seq lại từ đầu, giữ lại các gói đó; (2) pipeline Go nối tiếp `timestamp_ms` /
+`extended_rtp_timestamp` theo giờ nhận gói khi timestamp RTP lệch quá 2 s so với giờ nhận,
+giữ nguyên `rtp_timestamp` gốc; (3) một cờ bật/tắt. Không cần sửa C++ hay mở lại stream AI.
+
+### 6.2 Chưa làm
+
 - **C**: PLI/FIR — cần MF hỗ trợ `RTP/AVPF` + `rtcp-fb`, chốt RTCP cùng cổng hay cổng+1.
 - Fixture `coordinator/video_e2e_test.go` cũng tách 2 slice/frame thành 2 AU (chưa sửa).
