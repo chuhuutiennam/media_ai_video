@@ -507,7 +507,12 @@ func main() {
 	logLevel := flag.String("log-level", envOr("MOCK_AI_LOG", "info"), "debug|info|warn|error")
 	pcmDir := flag.String("pcm-dir", envOr("MOCK_AI_PCM_DIR", ""), "thư mục chứa file *.pcmu hoặc *.s16le để gửi làm audio_payload (round-robin per session)")
 	flag.IntVar(&audioPackets, "audio-packets", 1, "số 20ms PCMU packet đính kèm mỗi final result khi không có --pcm-dir (0 = không gửi audio)")
+	videoEndAfter := flag.Int("video-end-after", 0, "test: sau N kết quả video, worker kết thúc stream với trạng thái OK (như worker tự đóng stream giữa cuộc gọi); 0 = tắt")
 	flag.Parse()
+	if *videoEndAfter < 0 {
+		fmt.Fprintln(os.Stderr, "--video-end-after must be >= 0")
+		os.Exit(2)
+	}
 
 	zapLevel := zapcore.InfoLevel
 	switch *logLevel {
@@ -554,7 +559,10 @@ func main() {
 			},
 		},
 	}, struct{}{})
-	mockai.RegisterVideo(srv)
+	mockai.RegisterVideoWithOptions(srv, mockai.VideoOptions{EndStreamAfter: *videoEndAfter})
+	if *videoEndAfter > 0 {
+		zap.L().Warn("mock video streams end normally after N results (test mode)", zap.Int("video_end_after", *videoEndAfter))
+	}
 
 	if *pcmDir != "" {
 		var err error

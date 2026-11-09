@@ -15,7 +15,7 @@ import (
 )
 
 // segment preserves the legacy JPEG luminance mock, including error masks.
-func segment(stream grpc.ServerStream, first *pb.VideoRequest) error {
+func segment(stream grpc.ServerStream, first *pb.VideoRequest, opts VideoOptions) error {
 	config := first.GetConfig()
 	if config.InputFormat != "" && config.InputFormat != "jpeg" {
 		return status.Error(codes.InvalidArgument, "input_format must be jpeg")
@@ -30,7 +30,7 @@ func segment(stream grpc.ServerStream, first *pb.VideoRequest) error {
 	if math.IsNaN(float64(threshold)) || threshold < 0 || threshold > 1 {
 		return status.Error(codes.InvalidArgument, "threshold must be in [0,1]")
 	}
-	for {
+	for sent := 0; ; {
 		var req pb.VideoRequest
 		if err := stream.RecvMsg(&req); err != nil {
 			if err == io.EOF {
@@ -58,7 +58,8 @@ func segment(stream grpc.ServerStream, first *pb.VideoRequest) error {
 			AiService: first.GetConfig().AiService, Result: &pb.VideoResponse_Mask{Mask: mask}}); err != nil {
 			return err
 		}
-		if req.IsEos {
+		sent++
+		if req.IsEos || opts.endStream(sent) {
 			return nil
 		}
 	}

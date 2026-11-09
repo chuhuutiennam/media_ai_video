@@ -19,12 +19,29 @@ import (
 
 var generation atomic.Uint64
 
-// RegisterVideo serves both tasks on the canonical JPEG contract and RPC.
-func RegisterVideo(server *grpc.Server) {
-	server.RegisterService(&grpc.ServiceDesc{ServiceName: "video.VideoStream", HandlerType: (*any)(nil),
-		Streams: []grpc.StreamDesc{{StreamName: "Segment", Handler: process, ClientStreams: true, ServerStreams: true}}}, struct{}{})
+// VideoOptions điều khiển hành vi test của mock video.
+type VideoOptions struct {
+	// EndStreamAfter > 0: sau N kết quả, kết thúc stream với trạng thái OK (giả lập worker tự
+	// đóng stream giữa cuộc gọi). 0 = chạy tới khi client đóng.
+	EndStreamAfter int
 }
-func process(_ any, stream grpc.ServerStream) error {
+
+// RegisterVideo serves both tasks on the canonical JPEG contract and RPC.
+func RegisterVideo(server *grpc.Server) { RegisterVideoWithOptions(server, VideoOptions{}) }
+
+// RegisterVideoWithOptions như RegisterVideo, kèm tuỳ chọn test.
+func RegisterVideoWithOptions(server *grpc.Server, opts VideoOptions) {
+	handler := func(_ any, stream grpc.ServerStream) error { return process(stream, opts) }
+	server.RegisterService(&grpc.ServiceDesc{ServiceName: "video.VideoStream", HandlerType: (*any)(nil),
+		Streams: []grpc.StreamDesc{{StreamName: "Segment", Handler: handler, ClientStreams: true, ServerStreams: true}}}, struct{}{})
+}
+
+// endStream: đã gửi đủ kết quả theo VideoOptions.EndStreamAfter.
+func (o VideoOptions) endStream(sent int) bool {
+	return o.EndStreamAfter > 0 && sent >= o.EndStreamAfter
+}
+
+func process(stream grpc.ServerStream, opts VideoOptions) error {
 	var first pb.VideoRequest
 	if err := stream.RecvMsg(&first); err != nil {
 		return err
@@ -34,7 +51,7 @@ func process(_ any, stream grpc.ServerStream) error {
 		return status.Error(codes.InvalidArgument, "first message must contain config and session_id")
 	}
 	if config.AiService == "" || config.AiService == "segmentation" {
-		return segment(stream, &first)
+		return segment(stream, &first, opts)
 	}
 	if config.AiService != "gesture_recognition" || first.StreamId == "" || config.MediaEpoch == "" ||
 		config.InputFormat != "jpeg" || config.MaxHands < 1 || config.MaxHands > 8 || config.InferenceFps < 1 || config.InferenceFps > 60 {
@@ -76,7 +93,7 @@ func process(_ any, stream grpc.ServerStream) error {
 			Result: &pb.VideoResponse_Gesture{Gesture: g}}); err != nil {
 			return err
 		}
-		if request.IsEos {
+		if request.IsEos || opts.endStream(int(seq)) {
 			return nil
 		}
 	}

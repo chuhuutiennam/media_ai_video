@@ -18,9 +18,15 @@ import (
 
 func newJPEGTestPool(t *testing.T) *SharedConnPool {
 	t.Helper()
+	return newJPEGTestPoolWithOptions(t, mockai.VideoOptions{})
+}
+
+// newJPEGTestPoolWithOptions: SharedConnPool nối tới mockai video thật (in-memory pipe) với tuỳ chọn test.
+func newJPEGTestPoolWithOptions(t *testing.T, opts mockai.VideoOptions) *SharedConnPool {
+	t.Helper()
 	listener := &pipeListener{connections: make(chan net.Conn), done: make(chan struct{})}
 	server := grpc.NewServer()
-	mockai.RegisterVideo(server)
+	mockai.RegisterVideoWithOptions(server, opts)
 	go server.Serve(listener)
 	t.Cleanup(func() { server.Stop(); listener.Close() })
 	pool := NewSharedConnPool(0, 0)

@@ -43,7 +43,8 @@ Nguyên nhân:
 | S1 | Mặc định `video.ai.stream_timeout_sec` = **0** (stream sống theo cuộc gọi). > 0 vẫn là giới hạn cứng; hết hạn thì log + metric (S3, lý do `stream_timeout`). `ai.stream_timeout_sec` của audio không đổi. |
 | S2 | Kết nối lại: mở stream lỗi → tính một lượt, chờ backoff, thử tiếp. Backoff = `retry_backoff_ms × 2^(lượt−1)`, tối đa 30 s. Lượt đặt lại về 0 khi stream mới nhận được kết quả đầu tiên → `max_retry` là số lần lỗi **liên tiếp**. Mẫu `gateway-video-services.yaml` đổi `max_retry` 0 → 3. |
 | S3 | Stream dừng hẳn bất thường (`stream_timeout`, `permanent_error`, `retries_exhausted`) → Warn `ai: video stream stopped` (`session_id`, `stream_id`, `ai_service`, `reason`, `retries`, `error`) + counter `media_ai_video_ai_streams_stopped_total`. Session đóng hoặc kết thúc bình thường thì không log. |
-| — | Để sau: kiểm tra hợp lệ mask segmentation; hạn chờ kết quả cho frame đang gửi (worker treo không abort). |
+| S5 | (2026-11-09) **Worker kết thúc stream (OK/EOF) giữa cuộc gọi là lỗi.** Gateway video không bao giờ gửi EOS hay đóng hàng đợi frame giữa phiên, nên EOF khi session còn sống và gateway chưa gửi EOS → lỗi `ai: worker ended the video stream before the session`: đếm `ai_recv_errors_total`, Warn `ai: video recv error`, rồi mở lại theo S2 (hết lượt → S3 `retries_exhausted`). Đã gửi EOS thì EOF là bình thường. Không thêm cờ (tắt mở lại bằng `max_retry: 0`). Áp dụng cả AI Engine. `mock-ai-worker --video-end-after N` giả lập worker tự đóng stream. |
+| — | Để sau: kiểm tra hợp lệ mask segmentation (MF đã kiểm tra); hạn chờ kết quả cho frame đang gửi (worker treo không abort). Gốc rễ phía `../mediapipe`: luồng đọc frame chỉ bắt `ValueError`/`OSError`/`RuntimeError`, exception khác làm stream kết thúc OK — nên abort `INTERNAL` (repo khác). |
 
 ## 4. Kế hoạch kiểm chứng
 
@@ -64,6 +65,15 @@ Nguyên nhân:
 | `stream_timeout_sec: 5`, gửi 12 s | Dừng ở 5,08 s, không log | Dừng ở 5,05 s (giới hạn cứng đúng như cấu hình), Warn `ai: video stream stopped reason=stream_timeout`, `ai_streams_stopped_total` = 1 |
 | `change_background`: tắt AI giây 4, bật lại giây 6 | 0 kết quả sau khi AI chạy lại | Mở lại lần 1 lỗi (AI chưa lên) → lần 2 thành công sau ~3 s; 39 kết quả sau khi AI chạy lại, kết quả tới hết cuộc gọi (14,2 s) |
 | `video_effects` (gesture): như trên | 0 kết quả sau khi AI chạy lại | 74 kết quả sau khi AI chạy lại, tới hết cuộc gọi (14,45 s) |
+
+S5 (worker tự kết thúc stream): `mock-ai-worker --video-end-after 20`, gửi 12 s, so bản `2ac36c0` (đã
+có S1–S3) với bản sửa. `go test ./...` pass, test EOF + kết nối lại pass với `-race` (gồm 1 test gRPC
+thật trong tiến trình), E2E segmentation + gesture-only PASS, không có log mở lại thừa khi DELETE.
+
+| Dịch vụ | Bản `2ac36c0` | Bản sửa S5 |
+| --- | --- | --- |
+| `change_background` | Dừng ở 20 kết quả (4,24 s); `recv_errors` 0, `streams_stopped` 0, **không log** | 56 kết quả tới hết cuộc gọi (12,38 s); 2 lần worker đóng stream, mỗi lần Warn `ai: worker ended the video stream before the session` rồi mở lại |
+| `video_effects` (gesture) | Dừng ở 20 kết quả (2,39 s), không log | 88 kết quả tới hết cuộc gọi; 4 lần đóng/mở lại |
 
 Chưa cập nhật `docs/video-testing.md` (dòng "`stream_timeout_sec` … mặc định 300s") vì file đang có
 thay đổi chưa commit trên `main`; cần sửa thành mặc định 0 khi commit phần đó.

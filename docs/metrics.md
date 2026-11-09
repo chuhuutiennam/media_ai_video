@@ -322,11 +322,12 @@ lúc gói đứng sau khoảng trống đến, hết hạn thì bỏ qua cả kh
 | --- | --- |
 | ai_streams_active | Gauge: stream gRPC tới AI video đang mở (1 mỗi session/task) |
 | ai_frames_sent_total / ai_results_received_total | Frame JPEG đã gửi / kết quả đã nhận (mask + gesture) |
-| ai_send_errors_total / ai_recv_errors_total | Lỗi gửi / nhận trên stream (worker abort, mất kết nối…) |
+| ai_send_errors_total / ai_recv_errors_total | Lỗi gửi / nhận trên stream (worker abort, mất kết nối, worker tự kết thúc stream giữa phiên — `ai: worker ended the video stream before the session`…) |
 | ai_result_errors_total | Kết quả nhận được nhưng mask thiếu/`status != ok` hoặc gesture không hợp lệ |
 | ai_streams_stopped_total | Stream **dừng hẳn** giữa session: hết `video.ai.stream_timeout_sec` (> 0), lỗi gRPC vĩnh viễn (vd `INVALID_ARGUMENT`), hoặc hết `video.ai.max_retry` lần mở lại liên tiếp. Session đóng bình thường không tính |
 
-Khi stream lỗi, gateway mở lại sau backoff `retry_backoff_ms × 2^(lần−1)` (tối đa 30 s); mở lại lỗi
+Gateway video không kết thúc stream giữa phiên, nên worker đóng stream với trạng thái OK (EOF) khi
+session còn sống cũng là lỗi. Khi stream lỗi, gateway mở lại sau backoff `retry_backoff_ms × 2^(lần−1)` (tối đa 30 s); mở lại lỗi
 (vd worker chưa chạy lại) cũng tính một lần và thử tiếp. Số lần đặt lại về 0 khi stream mới nhận
 kết quả, nên `max_retry` là số lần lỗi liên tiếp. Log: Warn `ai: video recv error`, Warn
 `ai: video stream reopen failed` (`attempt`, `max_retry`), Info `ai: video stream reopened`, và khi

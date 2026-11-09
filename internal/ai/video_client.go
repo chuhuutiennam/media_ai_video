@@ -14,6 +14,9 @@ import (
 
 var ErrVideoSendTimeout = errors.New("ai: video send timeout")
 
+// ErrVideoStreamEnded: worker kết thúc stream (OK/EOF) khi session còn sống và gateway chưa gửi EOS.
+var ErrVideoStreamEnded = errors.New("ai: worker ended the video stream before the session")
+
 // VideoStreamClient abstracts một bidirectional gRPC stream video với AI service.
 type VideoStreamClient interface {
 	Send(frame pipeline.VideoFrame) error
@@ -58,6 +61,8 @@ type VideoStream struct {
 	retries int // số lần mở lại liên tiếp chưa có kết quả; về 0 khi stream mới nhận kết quả
 	// reopened: stream vừa được mở lại, chờ kết quả đầu tiên để đặt lại retries.
 	reopened atomic.Bool
+	// eosSent: gateway đã kết thúc chiều gửi của stream hiện tại (EOS / đóng frame input).
+	eosSent atomic.Bool
 
 	sendErrors atomic.Uint64
 	recvErrors atomic.Uint64
@@ -219,6 +224,7 @@ func (s *VideoStream) runPair(
 ) {
 	pairCtx, pairCancel := context.WithCancel(ctx)
 	defer pairCancel()
+	s.eosSent.Store(false) // mỗi stream mở lại bắt đầu chưa gửi EOS
 
 	// Cancel the actual RPC as well: a blocked Recv must not retain task slots.
 	if closer, ok := client.(io.Closer); ok {
@@ -262,7 +268,11 @@ func (s *VideoStream) runSend(ctx context.Context, client VideoStreamClient, fra
 			return false
 		case frame, ok := <-frameIn:
 			if !ok {
+				s.eosSent.Store(true) // trước CloseSend: EOF của worker sau đó là bình thường
 				return true
+			}
+			if frame.EndOfStream {
+				s.eosSent.Store(true) // trước khi gửi: worker có thể trả EOF ngay
 			}
 			firstTimer = nil
 			var sendErr error
@@ -333,6 +343,11 @@ func (s *VideoStream) runRecv(ctx context.Context, client VideoStreamClient, res
 		}
 
 		if recvErr != nil {
+			if recvErr == io.EOF && !s.eosSent.Load() {
+				// Gateway video không kết thúc stream giữa phiên: worker tự đóng (trạng thái OK)
+				// là bất thường → lỗi để mở lại, thay vì mất AI im lặng.
+				recvErr = ErrVideoStreamEnded
+			}
 			if ctx.Err() == nil && recvErr != io.EOF {
 				s.recvErrors.Add(1)
 				if s.totals != nil {

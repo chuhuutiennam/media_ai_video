@@ -70,7 +70,7 @@ func TestSharedJPEGContractDispatchAndValidation(t *testing.T) {
 				{SessionId: "call", StreamId: "video", Payload: &pb.VideoRequest_Config{Config: config}}, frame,
 				{SessionId: "call", StreamId: "video", IsEos: true},
 			}}
-			err := process(nil, stream)
+			err := process(stream, VideoOptions{})
 			if tc.invalid {
 				if status.Code(err) != codes.InvalidArgument || len(stream.output) != 0 {
 					t.Fatalf("invalid input accepted: err=%v, results=%d", err, len(stream.output))
