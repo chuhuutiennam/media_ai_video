@@ -59,7 +59,7 @@ func TestGestureTaskRoundTripAndGracefulDrain(t *testing.T) {
 	defer cancel()
 	in := make(chan pipeline.VideoFrame, 3)
 	out := make(chan pipeline.RecognitionResult, 3)
-	cfg := VideoStreamConfig{AIService: "gesture_recognition", SelectedService: "change_background", MediaEpoch: "source-1", InferFPS: 15, MaxHands: 4}
+	cfg := VideoStreamConfig{AIService: "gesture_recognition", SelectedService: "video_effects", MediaEpoch: "source-1", InferFPS: 15, MaxHands: 4}
 	stream, err := manager.Open(ctx, "call-tcore", "call:tcore:video", cfg, in, out)
 	if err != nil {
 		t.Fatal(err)

@@ -94,7 +94,7 @@ func TestVideoRoutingTwoGRPCWorkers(t *testing.T) {
 	}
 	defer segmentation.(*reservedVideoClient).Close()
 	gesture, err := router.Dial(ctx, "call-tcore", "call:tcore:video", VideoStreamConfig{
-		AIService: "gesture_recognition", SelectedService: "change_background", MediaEpoch: "source-1", InferFPS: 15, MaxHands: 4,
+		AIService: "gesture_recognition", SelectedService: "video_effects", MediaEpoch: "source-1", InferFPS: 15, MaxHands: 4,
 	})
 	if err != nil {
 		t.Fatal(err)
