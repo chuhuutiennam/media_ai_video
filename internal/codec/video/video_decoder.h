@@ -60,7 +60,7 @@ typedef struct {
     int    max_width;
     int    max_height;
     int    max_ready_frames;
-    int    drop_until_idr_on_loss;
+    /* Mất gói luôn bỏ mọi slice tới IDR kế tiếp (không có cờ tắt). */
 } VideoDecoderConfig;
 
 typedef struct {
@@ -68,14 +68,16 @@ typedef struct {
     uint64_t single_nalu_packets;
     uint64_t stapa_packets;
     uint64_t fua_packets;
-    uint64_t packet_gaps;
+    uint64_t packet_gaps;            /* số lần sequence RTP không liên tục */
     uint64_t corrupted_access_units;
     uint64_t access_units_completed;
     uint64_t idr_frames;
-    uint64_t wait_idr_drops;
+    uint64_t wait_idr_drops;         /* AU đã ghép xong nhưng bị bỏ vì đang chờ IDR */
     uint64_t decode_errors;
     uint64_t decoded_frames;
     uint64_t conversion_errors;
+    uint64_t wait_idr_episodes;      /* số lần bắt đầu chờ IDR do mất gói/AU hỏng (không tính đầu stream) */
+    int      waiting_for_idr;        /* 1 = đang chờ IDR (kể cả đầu stream) */
 } VideoDecoderStats;
 
 VideoDecoderHandle video_decoder_create(void);

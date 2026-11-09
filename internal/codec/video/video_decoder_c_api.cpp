@@ -10,7 +10,6 @@ static VideoDecoderConfig MakeConfig(const VideoDecoderConfig* c) {
     cfg.max_width              = 3840;
     cfg.max_height             = 2160;
     cfg.max_ready_frames       = 4;
-    cfg.drop_until_idr_on_loss = 1;
     // A caller may override just the dimensions. Zero numeric fields retain
     // defaults; otherwise max_nalu_size=0 silently drops every NAL, and
     // max_ready_frames=0 attempts to pop an empty frame queue.
@@ -20,7 +19,6 @@ static VideoDecoderConfig MakeConfig(const VideoDecoderConfig* c) {
         if (c->max_width > 0) cfg.max_width = c->max_width;
         if (c->max_height > 0) cfg.max_height = c->max_height;
         if (c->max_ready_frames > 0) cfg.max_ready_frames = c->max_ready_frames;
-        cfg.drop_until_idr_on_loss = c->drop_until_idr_on_loss;
     }
     return cfg;
 }

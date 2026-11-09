@@ -526,7 +526,9 @@ def check_errors(current, baseline, allow_frame_eviction=False):
     # counters are not evidence that the video path has no drops.
     for suffix in ('ingress_parse_errors_total', 'ingress_queue_dropped_total',
                    'jitter_late_dropped_total', 'jitter_duplicate_dropped_total',
-                   'jitter_output_dropped_total', 'jitter_lost_total'):
+                   'jitter_output_dropped_total', 'jitter_lost_total',
+                   'jitter_overflow_dropped_total', 'decoder_packet_gaps_total',
+                   'decoder_wait_idr_episodes_total'):
         key = VIDEO + suffix
         if key in current and key in baseline:
             amount = delta(current, baseline, key)

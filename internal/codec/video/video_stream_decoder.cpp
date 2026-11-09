@@ -1,16 +1,7 @@
 #include "video_stream_decoder.h"
 #include <cstring>
 
-static VideoDecoderConfig DefaultConfig() {
-    VideoDecoderConfig cfg{};
-    cfg.max_nalu_size          = 2 * 1024 * 1024;
-    cfg.max_access_unit_size   = 8 * 1024 * 1024;
-    cfg.max_width              = 3840;
-    cfg.max_height             = 2160;
-    cfg.max_ready_frames       = 4;
-    cfg.drop_until_idr_on_loss = 1;
-    return cfg;
-}
+// Giá trị mặc định của VideoDecoderConfig nằm ở MakeConfig (video_decoder_c_api.cpp).
 
 VideoStreamDecoder::VideoStreamDecoder(const VideoDecoderConfig& config)
     : config_(config)
@@ -52,12 +43,17 @@ VideoStatus VideoStreamDecoder::PushRtp(
         else if (nt == 28)            stats_.fua_packets++;
     }
 
+    const uint64_t gaps_before = parser_.SeqGaps();
     ParseStatus ps = parser_.Push(
         seq, ts, marker, payload, static_cast<size_t>(payload_size));
+    // Sequence đứt (gói mất trước gateway hoặc rơi ở hàng đợi nội bộ): parser đã bỏ AU dở
+    // và chuyển sang chờ IDR; đếm một lần cho lần Push này.
+    const bool seq_gap = parser_.SeqGaps() != gaps_before;
+    if (seq_gap) stats_.packet_gaps++;
 
     switch (ps) {
     case ParseStatus::PacketGap:
-        stats_.packet_gaps++;
+        if (!seq_gap) stats_.packet_gaps++;
         stats_.corrupted_access_units++;
         break;
     case ParseStatus::DropFragment:
@@ -96,7 +92,15 @@ VideoStatus VideoStreamDecoder::PushRtp(
         DrainDecoder(au.rtp_timestamp, ext_ts, ts_ms);
     }
 
-    return (ps == ParseStatus::PacketGap) ? VIDEO_PACKET_GAP : VIDEO_OK;
+    return (seq_gap || ps == ParseStatus::PacketGap) ? VIDEO_PACKET_GAP : VIDEO_OK;
+}
+
+VideoDecoderStats VideoStreamDecoder::GetStats() const {
+    VideoDecoderStats s = stats_;
+    s.wait_idr_drops    = parser_.WaitIdrDrops();
+    s.wait_idr_episodes = parser_.WaitIdrEpisodes();
+    s.waiting_for_idr   = parser_.WaitingForIdr() ? 1 : 0;
+    return s;
 }
 
 void VideoStreamDecoder::DrainDecoder(

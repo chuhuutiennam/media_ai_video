@@ -33,6 +33,8 @@ ai:
   reconnect_max_backoff_ms: 5000  # AI sống lại → gateway nối lại trong <= ~5s
 video:
   enabled: true
+  jitter:                         # jitter riêng cho RTP video (mặc định bật, xem gateway-video-ims.yaml);
+    enabled: true                 # session.per_session_packet_queue/pipeline.* ở trên chỉ còn cho audio
   worker_count: 2
   job_queue_size: 1024
   infer_width: 256

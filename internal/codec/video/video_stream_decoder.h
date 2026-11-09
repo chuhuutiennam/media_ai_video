@@ -27,7 +27,8 @@ public:
     void NotifyPacketLoss(uint16_t expected_seq, uint16_t received_seq);
     void Reset();
 
-    const VideoDecoderStats& GetStats() const { return stats_; }
+    // Snapshot thống kê; số liệu chờ IDR lấy từ parser.
+    VideoDecoderStats GetStats() const;
 
 private:
     void DrainDecoder(uint32_t rtp_ts, uint64_t ext_ts, int64_t ts_ms);

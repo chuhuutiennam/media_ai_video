@@ -47,6 +47,13 @@ func requireFFmpeg(t *testing.T) {
 // (1 access unit = 1 lời gọi Packetize() để mỗi frame có đúng 1 RTP
 // timestamp + marker bit ở packet cuối).
 func genH264RTPFrameGroups(t *testing.T, w, h, fps, seconds int) [][]*rtp.Packet {
+	return genH264RTPFrameGroupsGOP(t, w, h, fps, seconds, 0)
+}
+
+// genH264RTPFrameGroupsGOP như genH264RTPFrameGroups, gop > 0 đặt IDR mỗi gop frame
+// (0 = mặc định x264). `-threads 1`: zerolatency nhiều thread cắt mỗi frame thành nhiều
+// slice, splitAnnexBIntoFrames sẽ tách nhầm thành nhiều AU.
+func genH264RTPFrameGroupsGOP(t *testing.T, w, h, fps, seconds, gop int) [][]*rtp.Packet {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -55,14 +62,15 @@ func genH264RTPFrameGroups(t *testing.T, w, h, fps, seconds int) [][]*rtp.Packet
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "ffmpeg",
-		"-hide_banner", "-loglevel", "error",
-		"-f", "lavfi", "-i", "testsrc2=duration="+itoa(seconds)+":size="+itoa(w)+"x"+itoa(h)+":rate="+itoa(fps),
-		"-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
+	args := []string{"-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "testsrc2=duration=" + itoa(seconds) + ":size=" + itoa(w) + "x" + itoa(h) + ":rate=" + itoa(fps),
+		"-threads", "1", "-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
 		"-x264-params", "repeat-headers=1", // SPS/PPS lặp lại trước mỗi IDR trong elementary stream
-		"-pix_fmt", "yuv420p",
-		"-f", "h264", rawPath,
-	)
+		"-pix_fmt", "yuv420p"}
+	if gop > 0 {
+		args = append(args, "-g", itoa(gop), "-keyint_min", itoa(gop), "-sc_threshold", "0")
+	}
+	cmd := exec.CommandContext(ctx, "ffmpeg", append(args, "-f", "h264", rawPath)...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("ffmpeg encode elementary stream: %v\n%s", err, out)
 	}
@@ -260,7 +268,7 @@ func TestDecoder_H264_Roundtrip(t *testing.T) {
 
 // TestDecoder_LossyPackets mô phỏng packet loss + reorder — RTP parser/AU
 // assembler phải KHÔNG panic/deadlock, dù output có thể thiếu vài frame
-// quanh chỗ mất gói (drop_until_idr_on_loss theo policy mặc định).
+// quanh chỗ mất gói (mất gói luôn bỏ tới IDR kế tiếp).
 func TestDecoder_LossyPackets(t *testing.T) {
 	requireFFmpeg(t)
 

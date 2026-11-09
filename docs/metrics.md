@@ -294,15 +294,26 @@ Các counter `media_ai_jitter_*` cũ không bao phủ video jitter. Gateway bổ
 | jitter_input_total | Số lần Push vào jitter, kể cả bị từ chối |
 | jitter_received_total | Được nhận vào heap jitter |
 | jitter_released_total | Được đưa ra output của jitter |
-| jitter_late_dropped_total | Bị từ chối vì tuổi packet vượt max_packet_late_ms |
-| jitter_duplicate_dropped_total | Duplicate hoặc sequence đã được xử lý |
+| jitter_late_dropped_total | Bị từ chối vì tuổi packet vượt `video.jitter.max_late_ms` (tắt `video.jitter`: `pipeline.max_packet_late_ms`) |
+| jitter_duplicate_dropped_total | Duplicate hoặc sequence đã được xử lý (kể cả gói đến sau khi khoảng trống đã bị bỏ qua) |
 | jitter_output_dropped_total | Output channel của jitter đầy |
+| jitter_overflow_dropped_total | Jitter đã giữ đủ `video.jitter.max_packets` gói, gói mới bị bỏ |
 | jitter_dropped_total | Tổng các lý do drop trên |
-| jitter_lost_total | Gap sequence được declare lost, có thể trùng với packet đã drop late |
+| jitter_lost_total | Số sequence được declare lost, có thể trùng với packet đã drop late. Seq nhảy tiến lớn (đổi SSRC) cộng đúng số seq bị bỏ qua |
+| decoder_packet_gaps_total | Số lần depacketizer H264 thấy sequence đứt (gói mất trước gateway hoặc rơi ở hàng đợi nội bộ) |
+| decoder_wait_idr_episodes_total | Số lần decoder bắt đầu chờ IDR do mất gói/AU hỏng (không tính lần chờ IDR đầu stream) |
+| decoder_wait_idr_dropped_frames_total | AU đã ghép xong nhưng bị bỏ vì đang chờ IDR; frame mất mỗi lần ≈ giá trị này + AU hỏng |
+| decoder_wait_idr_ms_total | Tổng ms chờ IDR, tính theo giờ nhận gói tại listener; chia cho `decoder_wait_idr_episodes_total` ra thời gian đứng hình trung bình |
+| decoder_sessions_waiting_idr | Gauge: số session đang chờ IDR sau khi mất gói |
 
 Counter này được giữ trong vòng đời server/coordinator, không giữ reference tới
 session đã đóng. Không cộng lost và dropped như hai tập packet độc lập. Đối chiếu
-sender → ingress → jitter → video pool để phân biệt UDP loss, parse/queue drop và
-jitter drop. Các thay đổi counter không đổi jitter window hay chính sách nhận RTP.
+sender → ingress → jitter → video pool → decoder để phân biệt UDP loss, parse/queue drop,
+jitter drop và frame mất do chờ IDR. Mỗi lần hết chờ IDR, gateway log INFO
+`pipeline: video: đã nhận IDR sau khi mất gói` (`session_id`, `wait_ms`, `dropped_frames`).
+
+Jitter video cấu hình riêng ở `video.jitter` (mặc định bật): hạn chờ một khoảng trống tính từ
+lúc gói đứng sau khoảng trống đến, hết hạn thì bỏ qua cả khoảng trống một lần. Xem
+[giai-phap-video-rtp-ingest.md](giai-phap-video-rtp-ingest.md).
 
 `media_ai_dispatcher_task_queue_len{task="default|video_segment|gesture_recognition"}` là gauge theo từng nhánh (ba giá trị label cố định). Mỗi nhánh có `result.queue_size` chỗ và `result.dispatcher_workers` worker riêng. Metric counter Dispatcher hiện tại vẫn cộng gộp các nhánh.

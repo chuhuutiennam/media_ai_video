@@ -27,6 +27,7 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("jitter_late_dropped_total", "counter", "Video packets rejected as too old on Push", st.LateDropped)
 		write("jitter_duplicate_dropped_total", "counter", "Video old or duplicate packet drops", st.DuplicateDropped)
 		write("jitter_output_dropped_total", "counter", "Video packets dropped at full jitter output", st.OutputDropped)
+		write("jitter_overflow_dropped_total", "counter", "Video packets rejected because the jitter buffer held video.jitter.max_packets", st.OverflowDropped)
 	}
 	if s.videoPool != nil {
 		st := s.videoPool.Stats()
@@ -38,6 +39,11 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("frames_total", "counter", "Task frames enqueued for video AI (JPEG)", st.Frames)
 		write("frames_dropped_total", "counter", "Video frames dropped from AI input queue", st.FramesDropped)
 		write("decode_errors_total", "counter", "Video decode or JPEG conversion errors", st.DecodeErrors)
+		write("decoder_packet_gaps_total", "counter", "Video RTP sequence discontinuities seen by the H264 depacketizer", st.PacketGaps)
+		write("decoder_wait_idr_episodes_total", "counter", "Times a video decoder started waiting for an IDR after packet loss", st.WaitIDREpisodes)
+		write("decoder_wait_idr_dropped_frames_total", "counter", "Complete video access units discarded while waiting for an IDR", st.WaitIDRDroppedFrames)
+		write("decoder_wait_idr_ms_total", "counter", "Milliseconds video decoders waited for an IDR after packet loss (packet arrival time)", st.WaitIDRMsTotal)
+		write("decoder_sessions_waiting_idr", "gauge", "Video sessions waiting for an IDR after packet loss", uint64(s.videoPool.WaitingIDRSessions()))
 	}
 	if s.videoAI != nil {
 		st := s.videoAI.Stats()

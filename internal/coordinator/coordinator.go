@@ -32,6 +32,11 @@ type Config struct {
 	PCMDumpDir      string                     // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
 	CallbackClient  *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
 
+	// Jitter của track video (config video.jitter). VideoJitterConfig.PacketTimeMs == 0 → dùng
+	// JitterConfig/JitterOutSize như audio.
+	VideoJitterConfig  jitter.Config
+	VideoJitterOutSize int
+
 	// Video defaults — dùng khi session không tự chỉ định (Session.VideoInferWidth == 0, v.v.)
 	VideoMaxWidth, VideoMaxHeight                                      int // ngưỡng an toàn cho decoder; 0 = default C++ (3840x2160)
 	VideoInferWidth, VideoInferHeight                                  int
@@ -310,15 +315,25 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	return nil
 }
 
+// videoJitterConfig trả cấu hình jitter + cỡ jitterOut của track video; chưa cấu hình riêng
+// thì dùng chung với audio.
+func (c *Coordinator) videoJitterConfig() (jitter.Config, int) {
+	cfg, outSize := c.cfg.VideoJitterConfig, c.cfg.VideoJitterOutSize
+	if cfg.PacketTimeMs <= 0 {
+		cfg, outSize = c.cfg.JitterConfig, c.cfg.JitterOutSize
+	}
+	if outSize <= 0 {
+		outSize = 16
+	}
+	return cfg, outSize
+}
+
 // startVideoJitterPump khởi động jitter buffer + 2 goroutine bơm packet cho
 // track video, đối xứng với startJitterPump (audio).
 func (c *Coordinator) startVideoJitterPump(sess *session.Session) {
-	jitterOutSize := c.cfg.JitterOutSize
-	if jitterOutSize <= 0 {
-		jitterOutSize = 16
-	}
+	jitterCfg, jitterOutSize := c.videoJitterConfig()
 	jitterOut := make(chan pipeline.MediaPacket, jitterOutSize)
-	buf := jitter.NewWithCounters(c.cfg.JitterConfig, &c.videoJitter)
+	buf := jitter.NewWithCounters(jitterCfg, &c.videoJitter)
 
 	c.mu.Lock()
 	c.jitterBufs[sess.ID] = buf

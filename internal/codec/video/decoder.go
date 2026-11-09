@@ -84,24 +84,26 @@ type Stats struct {
 	SingleNALUPackets    uint64
 	StapAPackets         uint64
 	FuAPackets           uint64
-	PacketGaps           uint64
+	PacketGaps           uint64 // số lần sequence RTP không liên tục
 	CorruptedAccessUnits uint64
 	AccessUnitsCompleted uint64
 	IDRFrames            uint64
-	WaitIDRDrops         uint64
+	WaitIDRDrops         uint64 // AU đã ghép xong nhưng bị bỏ vì đang chờ IDR
 	DecodeErrors         uint64
 	DecodedFrames        uint64
 	ConversionErrors     uint64
+	WaitIDREpisodes      uint64 // số lần bắt đầu chờ IDR do mất gói/AU hỏng (không tính đầu stream)
+	WaitingForIDR        bool   // đang chờ IDR (kể cả đầu stream)
 }
 
 // Config khớp VideoDecoderConfig. Numeric fields set to zero retain C++
 // defaults, including when other fields (such as dimensions) are overridden.
+// Mất gói luôn bỏ mọi slice tới IDR kế tiếp (không có cờ tắt).
 type Config struct {
 	MaxNALUSize         int
 	MaxAccessUnitSize   int
 	MaxWidth, MaxHeight int
 	MaxReadyFrames      int
-	DropUntilIDROnLoss  bool
 }
 
 // Decoder là handle Go-facing cho 1 phiên decode video (1 session/stream).
@@ -123,12 +125,11 @@ func NewDecoder(cfg Config) (*Decoder, error) {
 		handle = C.video_decoder_create()
 	} else {
 		cCfg := C.VideoDecoderConfig{
-			max_nalu_size:          C.size_t(cfg.MaxNALUSize),
-			max_access_unit_size:   C.size_t(cfg.MaxAccessUnitSize),
-			max_width:              C.int(cfg.MaxWidth),
-			max_height:             C.int(cfg.MaxHeight),
-			max_ready_frames:       C.int(cfg.MaxReadyFrames),
-			drop_until_idr_on_loss: boolToCInt(cfg.DropUntilIDROnLoss),
+			max_nalu_size:        C.size_t(cfg.MaxNALUSize),
+			max_access_unit_size: C.size_t(cfg.MaxAccessUnitSize),
+			max_width:            C.int(cfg.MaxWidth),
+			max_height:           C.int(cfg.MaxHeight),
+			max_ready_frames:     C.int(cfg.MaxReadyFrames),
 		}
 		handle = C.video_decoder_create_with_config(&cCfg)
 	}
@@ -232,6 +233,8 @@ func (d *Decoder) Stats() Stats {
 		DecodeErrors:         uint64(s.decode_errors),
 		DecodedFrames:        uint64(s.decoded_frames),
 		ConversionErrors:     uint64(s.conversion_errors),
+		WaitIDREpisodes:      uint64(s.wait_idr_episodes),
+		WaitingForIDR:        s.waiting_for_idr != 0,
 	}
 }
 

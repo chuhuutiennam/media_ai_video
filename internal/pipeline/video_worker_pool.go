@@ -27,6 +27,11 @@ type VideoStats struct {
 	Frames        uint64 // JPEG frames enqueued for AI (before queue eviction)
 	FramesDropped uint64
 	DecodeErrors  uint64 // H264 decode, pixel conversion or JPEG encode errors
+
+	PacketGaps           uint64 // số lần decoder thấy sequence RTP đứt
+	WaitIDREpisodes      uint64 // số đợt chờ IDR do mất gói/AU hỏng
+	WaitIDRDroppedFrames uint64 // AU đã ghép xong nhưng bị bỏ khi chờ IDR
+	WaitIDRMsTotal       uint64 // tổng ms chờ IDR (theo giờ nhận gói)
 }
 
 // VideoWorkerPool nhận VideoJob (RTP packet H264), đẩy vào decode chain
@@ -47,6 +52,8 @@ type VideoWorkerPool struct {
 	frames        atomic.Uint64
 	framesDropped atomic.Uint64
 	decodeErrors  atomic.Uint64
+
+	packetGaps, waitEpisodes, waitDrops, waitMs atomic.Uint64
 }
 
 // NewVideoWorkerPool tạo VideoWorkerPool với config cho trước.
@@ -152,10 +159,15 @@ func (wp *VideoWorkerPool) worker(ctx context.Context, shard chan VideoJob) {
 			// One shard owns each session. Accumulate deltas so counters survive
 			// UnregisterSession without retaining closed decoders or session IDs.
 			frames, dropped, errors := sp.framesOut.Load(), sp.framesDropped.Load(), sp.decodeErrs.Load()
+			gaps, episodes, waitDrops, waitMs := sp.packetGaps.Load(), sp.waitEpisodes.Load(), sp.waitDrops.Load(), sp.waitMs.Load()
 			sp.push(job.Packet)
 			wp.frames.Add(sp.framesOut.Load() - frames)
 			wp.framesDropped.Add(sp.framesDropped.Load() - dropped)
 			wp.decodeErrors.Add(sp.decodeErrs.Load() - errors)
+			wp.packetGaps.Add(sp.packetGaps.Load() - gaps)
+			wp.waitEpisodes.Add(sp.waitEpisodes.Load() - episodes)
+			wp.waitDrops.Add(sp.waitDrops.Load() - waitDrops)
+			wp.waitMs.Add(sp.waitMs.Load() - waitMs)
 			wp.processed.Add(1)
 		}
 	}
@@ -170,6 +182,11 @@ func (wp *VideoWorkerPool) Stats() VideoStats {
 		Frames:        wp.frames.Load(),
 		FramesDropped: wp.framesDropped.Load(),
 		DecodeErrors:  wp.decodeErrors.Load(),
+
+		PacketGaps:           wp.packetGaps.Load(),
+		WaitIDREpisodes:      wp.waitEpisodes.Load(),
+		WaitIDRDroppedFrames: wp.waitDrops.Load(),
+		WaitIDRMsTotal:       wp.waitMs.Load(),
 	}
 }
 
@@ -178,6 +195,19 @@ func (wp *VideoWorkerPool) SessionCount() int {
 	wp.mu.RLock()
 	defer wp.mu.RUnlock()
 	return len(wp.pipelines)
+}
+
+// WaitingIDRSessions trả về số session video đang chờ IDR sau khi mất gói.
+func (wp *VideoWorkerPool) WaitingIDRSessions() int {
+	wp.mu.RLock()
+	defer wp.mu.RUnlock()
+	n := 0
+	for _, sp := range wp.pipelines {
+		if sp.waitingIDR.Load() {
+			n++
+		}
+	}
+	return n
 }
 
 // QueueLen trả về số job đang chờ trong queue.

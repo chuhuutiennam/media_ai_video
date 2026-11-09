@@ -1,4 +1,4 @@
-// Package jitter cung cấp jitter buffer per-session cho RTP audio stream.
+// Package jitter cung cấp jitter buffer per-session cho RTP audio và video stream.
 //
 // Thiết kế:
 //   - Giữ packet trong min-heap theo sequence number.
@@ -6,6 +6,8 @@
 //   - Flush mỗi PacketTimeMs (20ms): release packet đúng thứ tự.
 //   - Nếu packet thiếu và đã chờ quá BufferMs: ghi nhận lost, tiếp tục.
 //   - Packet đến quá trễ (> MaxLateMs kể từ ReceivedAtMs): drop ngay.
+//   - Video (Config.SkipGaps): hạn chờ tính từ lúc gói sau khoảng trống đến, bỏ qua cả
+//     khoảng trống một lần; Config.MaxPackets giới hạn số gói chờ.
 package jitter
 
 import (
@@ -24,6 +26,14 @@ type Config struct {
 	BufferMs     int // cửa sổ chờ reorder và holdUntil sau mỗi gap (mặc định 60ms)
 	MaxLateMs    int // packet cũ hơn mức này theo wall clock sẽ bị drop (mặc định 120ms)
 	PacketTimeMs int // chu kỳ flush, khớp ptime codec (mặc định 20ms)
+
+	// SkipGaps (video): hạn chờ một khoảng trống tính từ lúc gói đứng sau khoảng trống đến
+	// (+BufferMs); hết hạn thì khai báo mất cả khoảng trống một lần. false = hành vi audio:
+	// hạn chờ tính từ lần nhả gần nhất, mỗi seq thiếu chờ thêm một cửa sổ.
+	SkipGaps bool
+	// MaxPackets > 0: số gói chờ tối đa trong buffer; Push khi đầy bị bỏ (OverflowDropped).
+	// 0 = không giới hạn.
+	MaxPackets int
 }
 
 func DefaultConfig() Config {
@@ -40,9 +50,10 @@ type Stats struct {
 	LateDropped      uint64
 	DuplicateDropped uint64
 	OutputDropped    uint64
+	OverflowDropped  uint64 // Push khi buffer đã đủ MaxPackets
 	Received         uint64
 	Released         uint64
-	Dropped          uint64 // đến quá trễ, duplicate, hoặc output channel đầy
+	Dropped          uint64 // đến quá trễ, duplicate, output channel đầy hoặc buffer đầy
 	Lost             uint64 // gap được phát hiện (packet không bao giờ đến)
 	Jitter           uint32 // inter-arrival jitter theo RFC 3550 §6.4.1 (RTP timestamp units)
 }
@@ -51,12 +62,13 @@ type Stats struct {
 // It deliberately does not change jitter admission, timing or drop policy.
 type Counters struct {
 	received, released, dropped, lost, pushed atomic.Uint64
-	late, duplicate, output                   atomic.Uint64
+	late, duplicate, output, overflow         atomic.Uint64
 }
 
 func (c *Counters) Stats() Stats {
 	return Stats{Received: c.received.Load(), Released: c.released.Load(), Dropped: c.dropped.Load(), Lost: c.lost.Load(),
-		Pushed: c.pushed.Load(), LateDropped: c.late.Load(), DuplicateDropped: c.duplicate.Load(), OutputDropped: c.output.Load()}
+		Pushed: c.pushed.Load(), LateDropped: c.late.Load(), DuplicateDropped: c.duplicate.Load(), OutputDropped: c.output.Load(),
+		OverflowDropped: c.overflow.Load()}
 }
 
 type dropReason uint8
@@ -65,6 +77,7 @@ const (
 	dropLate dropReason = iota
 	dropDuplicate
 	dropOutput
+	dropOverflow
 )
 
 func (c *Counters) drop(reason dropReason) {
@@ -76,15 +89,17 @@ func (c *Counters) drop(reason dropReason) {
 		c.duplicate.Add(1)
 	case dropOutput:
 		c.output.Add(1)
+	case dropOverflow:
+		c.overflow.Add(1)
 	}
 }
 
 // Buffer là jitter buffer cho một RTP session.
 // Goroutine-safe: Push() gọi được từ nhiều goroutine; Run() chạy một goroutine flush riêng.
 type Buffer struct {
-	aggregate                                            *Counters
-	pushed, lateDropped, duplicateDropped, outputDropped atomic.Uint64
-	cfg                                                  Config
+	aggregate                                                      *Counters
+	pushed, lateDropped, duplicateDropped, outputDropped, overflow atomic.Uint64
+	cfg                                                            Config
 
 	mu           sync.Mutex
 	h            packetHeap
@@ -132,20 +147,33 @@ func (b *Buffer) drop(reason dropReason) {
 		b.duplicateDropped.Add(1)
 	case dropOutput:
 		b.outputDropped.Add(1)
+	case dropOverflow:
+		b.overflow.Add(1)
 	}
 	if b.aggregate != nil {
 		b.aggregate.drop(reason)
 	}
 }
 
+func (b *Buffer) addLost(n uint64) {
+	b.lost.Add(n)
+	if b.aggregate != nil {
+		b.aggregate.lost.Add(n)
+	}
+}
+
 // Push nhận một MediaPacket vào buffer.
 // Trả về false nếu packet bị drop.
 func (b *Buffer) Push(pkt pipeline.MediaPacket) bool {
+	return b.pushAt(pkt, time.Now())
+}
+
+// pushAt là Push với thời điểm đến cho trước (test dùng đồng hồ giả).
+func (b *Buffer) pushAt(pkt pipeline.MediaPacket, now time.Time) bool {
 	b.pushed.Add(1)
 	if b.aggregate != nil {
 		b.aggregate.pushed.Add(1)
 	}
-	now := time.Now()
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -160,6 +188,11 @@ func (b *Buffer) Push(pkt pipeline.MediaPacket) bool {
 	// Drop duplicate của seq đã được release hoặc declare lost.
 	if b.hasProcessed && SeqDiff(pkt.Sequence, b.lastProcessed) <= 0 {
 		b.drop(dropDuplicate)
+		return false
+	}
+
+	if b.cfg.MaxPackets > 0 && len(b.h) >= b.cfg.MaxPackets {
+		b.drop(dropOverflow)
 		return false
 	}
 
@@ -199,7 +232,7 @@ func (b *Buffer) Run(ctx context.Context, out chan<- pipeline.MediaPacket) {
 func (b *Buffer) Stats() Stats {
 	return Stats{
 		Pushed: b.pushed.Load(), LateDropped: b.lateDropped.Load(), DuplicateDropped: b.duplicateDropped.Load(), OutputDropped: b.outputDropped.Load(),
-		Received: b.received.Load(),
+		OverflowDropped: b.overflow.Load(), Received: b.received.Load(),
 		Released: b.released.Load(),
 		Dropped:  b.dropped.Load(),
 		Lost:     b.lost.Load(),
@@ -286,14 +319,25 @@ func (b *Buffer) flush(now time.Time, out chan<- pipeline.MediaPacket) {
 
 		} else {
 			// diff > 0: heap có packet ở phía trước, đang thiếu nextExpected.
+			if b.cfg.SkipGaps {
+				// Video: chờ BufferMs kể từ lúc gói đứng sau khoảng trống đến (giữa 2 frame
+				// có khoảng nghỉ, tính từ lần nhả gần nhất sẽ hết hạn trước khi gói đảo thứ tự
+				// kịp đến), rồi bỏ qua cả khoảng trống một lần.
+				if !now.After(top.arrivedAt.Add(bufDur)) {
+					break
+				}
+				b.addLost(uint64(diff))
+				b.lastProcessed = top.pkt.Sequence - 1
+				b.hasProcessed = true
+				b.nextExpected = top.pkt.Sequence
+				b.holdUntil = now.Add(bufDur)
+				continue
+			}
 			if now.After(b.holdUntil) {
 				// Đã chờ đủ lâu → declare lost, tiến tới seq tiếp theo.
 				b.lastProcessed = b.nextExpected
 				b.hasProcessed = true
-				b.lost.Add(1)
-				if b.aggregate != nil {
-					b.aggregate.lost.Add(1)
-				}
+				b.addLost(1)
 				b.nextExpected++
 				b.holdUntil = now.Add(bufDur)
 				// Tiếp tục vòng lặp để thử release seq mới.

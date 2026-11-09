@@ -22,6 +22,7 @@ ParseStatus H264RtpParser::Push(
         seq_initialized_   = true;
         next_expected_seq_ = seq;
     } else if (seq != next_expected_seq_) {
+        seq_gaps_++;
         NotifyPacketLoss(next_expected_seq_, seq);
     }
     next_expected_seq_ = static_cast<uint16_t>(seq + 1);
@@ -64,6 +65,9 @@ void H264RtpParser::Reset() {
     seq_initialized_   = false;
     next_expected_seq_ = 0;
     ready_aus_.clear();
+    seq_gaps_          = 0;
+    wait_idr_drops_    = 0;
+    wait_idr_episodes_ = 0;
 }
 
 void H264RtpParser::AppendNAL(const uint8_t* nalu, size_t size) {
@@ -84,7 +88,10 @@ void H264RtpParser::AppendNAL(const uint8_t* nalu, size_t size) {
 
     if (wait_for_idr_) {
         if (is_sps || is_pps) return; // cache only, emit on IDR
-        if (!is_idr)          return; // drop until IDR
+        if (!is_idr) {                // drop until IDR
+            if (nal_type >= 1 && nal_type <= 4) current_au_.wait_idr_dropped = true; // slice
+            return;
+        }
 
         // IDR: prepend cached SPS + PPS so decoder can initialize
         wait_for_idr_ = false;
@@ -103,6 +110,7 @@ void H264RtpParser::AppendNAL(const uint8_t* nalu, size_t size) {
 
 void H264RtpParser::FlushCurrentAccessUnit() {
     if (!has_timestamp_) return;
+    if (current_au_.wait_idr_dropped) wait_idr_drops_++;
     if (!current_au_.data.empty() && !current_au_.corrupted) {
         ready_aus_.push_back(std::move(current_au_));
     }
@@ -116,6 +124,7 @@ void H264RtpParser::StartAccessUnit(uint32_t ts) {
     current_au_.rtp_timestamp = ts;
     current_au_.key_frame     = false;
     current_au_.corrupted     = false;
+    current_au_.wait_idr_dropped = false;
     current_au_.data.clear();
 }
 
@@ -127,7 +136,8 @@ void H264RtpParser::AbortFuA() {
 void H264RtpParser::MarkCurrentAUCorrupted() {
     current_au_    = H264AccessUnit{};
     has_timestamp_ = false;
-    wait_for_idr_  = true; // DROP_UNTIL_IDR policy
+    if (!wait_for_idr_) wait_idr_episodes_++;
+    wait_for_idr_  = true; // DROP_UNTIL_IDR policy (luôn áp dụng)
 }
 
 // ── packet type handlers ──────────────────────────────────────────────────────

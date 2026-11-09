@@ -417,9 +417,15 @@ func TestLoad_AIReconnectMaxBackoff_Validation(t *testing.T) {
 func TestVideoSessionQueueConfig(t *testing.T) {
 	cfg := Default()
 	cfg.Session.PerSessionPacketQueue = 512
+	cfg.Video.Jitter.PacketQueueSize = 2048
 	cfg.Video.FrameQueueSize = 7
 	got := cfg.ToSessionManagerConfig()
-	if got.VideoPacketQueueSize != 512 || got.VideoFrameQueueSize != 7 {
+	if got.VideoPacketQueueSize != 2048 || got.VideoFrameQueueSize != 7 || got.PacketQueueSize != 512 {
 		t.Fatalf("video queues not propagated: %+v", got)
+	}
+	// video.jitter.enabled=false: video dùng chung hàng đợi gói với audio (hành vi cũ).
+	cfg.Video.Jitter.Enabled = false
+	if got := cfg.ToSessionManagerConfig(); got.VideoPacketQueueSize != 512 {
+		t.Fatalf("legacy video packet queue = %d, want 512", got.VideoPacketQueueSize)
 	}
 }

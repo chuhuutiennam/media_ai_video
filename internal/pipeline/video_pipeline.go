@@ -67,6 +67,16 @@ type sessionVideoPipeline struct {
 	decodeErrs    atomic.Uint64
 	nativeErrors  uint64 // native decoder counters already accumulated; protected by mu
 
+	// Mất gói / chờ IDR: counter cộng dồn (worker pool lấy delta) và đợt chờ hiện tại.
+	packetGaps       atomic.Uint64
+	waitDrops        atomic.Uint64
+	waitEpisodes     atomic.Uint64
+	waitMs           atomic.Uint64
+	waitingIDR       atomic.Bool // đang trong một đợt chờ IDR do mất gói
+	nativeLoss       video.Stats // counter native đã cộng; protected by mu
+	waitStartMs      int64       // giờ nhận gói lúc bắt đầu đợt chờ; protected by mu
+	waitDropsAtStart uint64      // waitDrops lúc bắt đầu đợt chờ; protected by mu
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -122,6 +132,11 @@ func (sp *sessionVideoPipeline) push(pkt MediaPacket) {
 		total := st.DecodeErrors + st.ConversionErrors
 		sp.decodeErrs.Add(total - sp.nativeErrors)
 		sp.nativeErrors = total
+		atMs := pkt.ReceivedAtMs
+		if atMs <= 0 {
+			atMs = time.Now().UnixMilli()
+		}
+		sp.trackLoss(st, atMs)
 	}()
 
 	sp.packetsIn.Add(1)
@@ -143,6 +158,42 @@ func (sp *sessionVideoPipeline) push(pkt MediaPacket) {
 		}
 		sp.handleDecodedFrame(frame)
 	}
+}
+
+// trackLoss cộng số liệu mất gói từ counter native và theo dõi đợt chờ IDR theo giờ nhận gói
+// tại listener (atMs). Đợt chờ bắt đầu khi decoder báo thêm một episode, kết thúc khi decoder
+// hết chờ (đã nhận IDR). Lần chờ IDR đầu stream không tính. Gọi dưới sp.mu sau mỗi PushRTP.
+func (sp *sessionVideoPipeline) trackLoss(st video.Stats, atMs int64) {
+	prev := sp.nativeLoss
+	sp.nativeLoss = st
+	dropsBefore := sp.waitDrops.Load()
+	sp.packetGaps.Add(st.PacketGaps - prev.PacketGaps)
+	sp.waitDrops.Add(st.WaitIDRDrops - prev.WaitIDRDrops)
+	started := st.WaitIDREpisodes - prev.WaitIDREpisodes
+	sp.waitEpisodes.Add(started)
+
+	if sp.waitingIDR.Load() && (started > 0 || !st.WaitingForIDR) {
+		sp.endWait(atMs)
+	}
+	if started == 0 {
+		return
+	}
+	sp.waitingIDR.Store(true)
+	sp.waitStartMs, sp.waitDropsAtStart = atMs, dropsBefore
+	zap.L().Debug("pipeline: video: mất gói, chờ IDR", zap.String("session_id", sp.cfg.SessionID))
+	if !st.WaitingForIDR { // bắt đầu và hết chờ trong cùng một gói
+		sp.endWait(atMs)
+	}
+}
+
+func (sp *sessionVideoPipeline) endWait(atMs int64) {
+	waited := max(int64(0), atMs-sp.waitStartMs)
+	sp.waitMs.Add(uint64(waited))
+	sp.waitingIDR.Store(false)
+	zap.L().Info("pipeline: video: đã nhận IDR sau khi mất gói",
+		zap.String("session_id", sp.cfg.SessionID),
+		zap.Int64("wait_ms", waited),
+		zap.Uint64("dropped_frames", sp.waitDrops.Load()-sp.waitDropsAtStart))
 }
 
 // handleDecodedFrame samples each task after decoding and prepares JPEG buffers,
@@ -224,8 +275,8 @@ func (sp *sessionVideoPipeline) handleDecodedFrame(frame *video.Frame) {
 		OriginalHeight:       int32(frame.Height),
 		JPEG:                 jpegBuf,
 		EffectType:           sp.cfg.EffectType,
-		Width:                w, 
-		Height: 			  h,
+		Width:                w,
+		Height:               h,
 	}
 	if sp.cfg.Gesture != nil {
 		out.FrameID = sp.decodedSeq

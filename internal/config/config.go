@@ -171,6 +171,21 @@ type VideoSection struct {
 	// Services: danh mục dịch vụ video, mỗi dịch vụ đúng một AI service. Rỗng = config cũ
 	// (video.ai.workers / grpc_target / engine_target + video.gesture.enabled).
 	Services map[string]VideoServiceSection `yaml:"services"`
+
+	Jitter VideoJitterSection `yaml:"jitter"`
+}
+
+// VideoJitterSection: jitter buffer riêng cho RTP video từ MF.
+// Enabled=false: video dùng chung pipeline.* và session.per_session_packet_queue với audio,
+// thuật toán audio (hạn chờ tính từ lần nhả gần nhất, mỗi seq thiếu chờ một cửa sổ).
+type VideoJitterSection struct {
+	Enabled         bool `yaml:"enabled"`
+	BufferMs        int  `yaml:"buffer_ms"`         // chờ gói đảo thứ tự/thiếu, tính từ lúc gói sau khoảng trống đến
+	MaxLateMs       int  `yaml:"max_late_ms"`       // gói nằm trong hàng đợi trước jitter quá lâu thì bỏ
+	PacketTimeMs    int  `yaml:"packet_time_ms"`    // chu kỳ flush
+	PacketQueueSize int  `yaml:"packet_queue_size"` // listener → jitter, mỗi session
+	OutQueueSize    int  `yaml:"out_queue_size"`    // jitter → video worker pool, mỗi session
+	MaxPackets      int  `yaml:"max_packets"`       // trần gói chờ trong jitter mỗi session
 }
 
 type GestureSection struct {
@@ -328,6 +343,15 @@ func Default() GatewayConfig {
 				RetryBackoffMs:     1000,
 				Failover:           true,
 			},
+			Jitter: VideoJitterSection{
+				Enabled:         true,
+				BufferMs:        80,
+				MaxLateMs:       200,
+				PacketTimeMs:    20,
+				PacketQueueSize: 1024, // một frame video gồm nhiều gói RTP
+				OutQueueSize:    1024, // IDR có thể hàng trăm gói, nhả trong một lần flush
+				MaxPackets:      1024,
+			},
 		},
 		AI: AISection{
 			GRPCTarget:          "ai-router:50051",
@@ -392,6 +416,33 @@ func (c GatewayConfig) validateAnswerDeadline() error {
 	return nil
 }
 
+// validateVideoJitter kiểm tra video.jitter khi video và jitter riêng đều bật.
+func (c GatewayConfig) validateVideoJitter() error {
+	j := c.Video.Jitter
+	if !c.Video.Enabled || !j.Enabled {
+		return nil
+	}
+	for _, r := range []struct {
+		name          string
+		value, lo, hi int
+	}{
+		{"buffer_ms", j.BufferMs, 10, 1000},
+		{"max_late_ms", j.MaxLateMs, 20, 5000},
+		{"packet_time_ms", j.PacketTimeMs, 5, 100},
+		{"packet_queue_size", j.PacketQueueSize, 16, 65536},
+		{"out_queue_size", j.OutQueueSize, 16, 65536},
+		{"max_packets", j.MaxPackets, 64, 65536},
+	} {
+		if r.value < r.lo || r.value > r.hi {
+			return fmt.Errorf("video.jitter.%s must be %d..%d, got %d", r.name, r.lo, r.hi, r.value)
+		}
+	}
+	if j.PacketTimeMs > j.BufferMs {
+		return fmt.Errorf("video.jitter.packet_time_ms (%d) must be <= video.jitter.buffer_ms (%d)", j.PacketTimeMs, j.BufferMs)
+	}
+	return nil
+}
+
 // Load đọc YAML config tại path, merge lên Default().
 // Field thiếu trong YAML giữ nguyên giá trị Default.
 func Load(path string) (GatewayConfig, error) {
@@ -423,6 +474,9 @@ func Load(path string) (GatewayConfig, error) {
 		return GatewayConfig{}, fmt.Errorf("video.ai.readiness_requires_ai requires video.enabled=true and AI targets from video.services, video.ai.workers or video.ai.grpc_target (not video.ai.engine_target)")
 	}
 	if err := cfg.validateAnswerDeadline(); err != nil {
+		return GatewayConfig{}, err
+	}
+	if err := cfg.validateVideoJitter(); err != nil {
 		return GatewayConfig{}, err
 	}
 	if !cfg.Audio.Enabled && strings.TrimSpace(cfg.AI.GRPCTarget) != "" {
@@ -460,9 +514,32 @@ func (c GatewayConfig) ToSessionManagerConfig() session.ManagerConfig {
 		ResultQueueSize:      c.Session.PerSessionResultQueue,
 		IdleTimeout:          time.Duration(c.Session.IdleTimeoutSec) * time.Second,
 		GCInterval:           time.Duration(c.Session.GCIntervalSec) * time.Second,
-		VideoPacketQueueSize: c.Session.PerSessionPacketQueue,
+		VideoPacketQueueSize: c.videoPacketQueueSize(),
 		VideoFrameQueueSize:  c.Video.FrameQueueSize,
 	}
+}
+
+// videoPacketQueueSize: hàng đợi listener → jitter của video; dùng chung với audio khi tắt video.jitter.
+func (c GatewayConfig) videoPacketQueueSize() int {
+	if c.Video.Jitter.Enabled {
+		return c.Video.Jitter.PacketQueueSize
+	}
+	return c.Session.PerSessionPacketQueue
+}
+
+// videoJitter trả cấu hình jitter + cỡ hàng đợi ra của video; tắt video.jitter thì giống audio.
+func (c GatewayConfig) videoJitter(audio jitter.Config) (jitter.Config, int) {
+	j := c.Video.Jitter
+	if !j.Enabled {
+		return audio, c.Pipeline.JitterOutQueueSize
+	}
+	return jitter.Config{
+		BufferMs:     j.BufferMs,
+		MaxLateMs:    j.MaxLateMs,
+		PacketTimeMs: j.PacketTimeMs,
+		SkipGaps:     true,
+		MaxPackets:   j.MaxPackets,
+	}, j.OutQueueSize
 }
 
 // ToWorkerPoolConfig chuyển đổi sang pipeline.WorkerPoolConfig.
@@ -497,12 +574,14 @@ func (c GatewayConfig) ToDispatcherConfig() result.Config {
 
 // ToCoordinatorConfig chuyển đổi sang coordinator.Config.
 func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
+	audioJitter := jitter.Config{
+		BufferMs:     c.Pipeline.JitterBufferMs,
+		MaxLateMs:    c.Pipeline.MaxPacketLateMs,
+		PacketTimeMs: c.Pipeline.PacketTimeMs,
+	}
+	videoJitter, videoJitterOut := c.videoJitter(audioJitter)
 	return coordinator.Config{
-		JitterConfig: jitter.Config{
-			BufferMs:     c.Pipeline.JitterBufferMs,
-			MaxLateMs:    c.Pipeline.MaxPacketLateMs,
-			PacketTimeMs: c.Pipeline.PacketTimeMs,
-		},
+		JitterConfig:    audioJitter,
 		JitterOutSize:   c.Pipeline.JitterOutQueueSize,
 		OutSampleRate:   c.Audio.OutputSampleRate,
 		OutChannels:     c.Audio.OutputChannels,
@@ -511,6 +590,7 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		CallbackRetry:   c.Callback.MaxRetry,
 		PCMDumpDir:      c.Audio.PCMDumpDir,
 
+		VideoJitterConfig: videoJitter, VideoJitterOutSize: videoJitterOut,
 		VideoMaxWidth: c.Video.MaxWidth, VideoMaxHeight: c.Video.MaxHeight,
 		VideoInferWidth: c.Video.InferWidth, VideoInferHeight: c.Video.InferHeight,
 		VideoInferFPS:    c.Video.InferFPS,

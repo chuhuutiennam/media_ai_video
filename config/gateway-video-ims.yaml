@@ -65,13 +65,13 @@ session:
   max_sessions:             300     # mẫu — theo tổng năng lực AI video (admission từ chối ở 90%)
   idle_timeout_sec:         60      # gói RTP video cũng tính là hoạt động
   gc_interval_sec:          10
-  per_session_packet_queue: 1024    # một frame video gồm nhiều gói RTP (media_ai audio dùng 256)
+  per_session_packet_queue: 1024    # audio; video dùng video.jitter.packet_queue_size
 
-# ── Jitter (dùng chung cho audio và video) ───────────────────────────────────
+# ── Jitter audio (video dùng video.jitter bên dưới; tắt video.jitter thì video dùng chung mục này)
 pipeline:
   jitter_buffer_ms:      80         # mạng IMS jitter cao hơn LAN (theo media_ai)
   max_packet_late_ms:    200
-  jitter_out_queue_size: 1024       # video: nhiều gói mỗi frame (media_ai audio dùng 32)
+  jitter_out_queue_size: 1024
 
 # ── Audio: tắt ───────────────────────────────────────────────────────────────
 # Gateway chỉ video: ANSWER speech_to_text/realtime_translation trả 400
@@ -93,6 +93,17 @@ ai:
 # ── Video ────────────────────────────────────────────────────────────────────
 video:
   enabled: true
+  # Jitter riêng cho RTP video từ MF. Chờ gói đảo thứ tự/thiếu tính từ lúc gói sau khoảng trống
+  # đến; hết hạn thì bỏ qua cả khoảng trống một lần (mất gói → decoder chờ IDR kế tiếp).
+  # enabled: false = hành vi cũ: dùng session.per_session_packet_queue + pipeline.* như audio.
+  jitter:
+    enabled: true
+    buffer_ms: 80                   # 10..1000; mạng IMS jitter cao hơn LAN
+    max_late_ms: 200                # 20..5000; gói nằm hàng đợi trước jitter quá lâu thì bỏ
+    packet_time_ms: 20              # 5..100, ≤ buffer_ms; chu kỳ flush
+    packet_queue_size: 1024         # listener → jitter; một frame video gồm nhiều gói RTP
+    out_queue_size: 1024            # jitter → decoder; IDR có thể hàng trăm gói nhả một lần
+    max_packets: 1024               # 64..65536; trần gói chờ mỗi session, vượt thì bỏ gói mới
   worker_count: 8
   job_queue_size: 1024
   infer_width: 256

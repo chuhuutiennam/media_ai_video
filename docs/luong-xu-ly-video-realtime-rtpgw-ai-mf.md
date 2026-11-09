@@ -350,8 +350,13 @@ NAL và nhiều packet. Ví dụ header của packet cuối một frame:
 RTPGW thực hiện:
 
 1. Listener trên port của leg nhận UDP, parse RTP và đưa vào pipeline đúng session.
-2. Reorder/jitter theo sequence; chuyển packet hợp lệ cho decoder.
-3. Reassemble/decode H264 bằng decoder riêng của session, giữ RTP timestamp.
+2. Reorder/jitter theo sequence; chuyển packet hợp lệ cho decoder. Jitter video cấu
+   hình riêng ở `video.jitter` (mặc định bật): gói thiếu được chờ `buffer_ms` kể từ lúc
+   gói đứng sau khoảng trống đến, hết hạn thì bỏ qua cả khoảng trống một lần (mất 20 gói
+   liên tiếp: jitter đứng ~270 ms thay vì ~2 s như thuật toán audio).
+3. Reassemble/decode H264 bằng decoder riêng của session, giữ RTP timestamp. Sequence
+   đứt (mất gói) → bỏ AU dở và mọi slice tới IDR kế tiếp; RTPGW không gửi PLI/FIR nên
+   thời gian mất hình phụ thuộc chu kỳ IDR của nguồn. Đo bằng `media_ai_video_decoder_*`.
 4. Gán source frame identity, quy đổi media timestamp và mở rộng RTP timestamp.
 5. Lấy mẫu **sau decode** theo task/source FPS, resize và encode JPEG.
 
@@ -1001,6 +1006,7 @@ trên mạng. File trace/PNG được ghi ngoài đường callback ACK.
 
 | Nơi giữ dữ liệu | Đặc điểm |
 | --- | --- |
+| RTPGW RTP video trước decode | `video.jitter.packet_queue_size` (listener → jitter), `max_packets` (heap jitter), `out_queue_size` (jitter → decoder), `video.job_queue_size` (shard decoder); đầy thì bỏ gói, decoder thấy sequence đứt và chờ IDR |
 | RTPGW video/task queue | Bounded theo cấu hình; không block decoder vô hạn chờ AI |
 | Engine nếu bật | Credit ingress + queue task độc lập, xử lý evict/timeout riêng |
 | Result Dispatcher RTPGW | Queue và callback worker pool riêng theo task; worker chờ HTTP ACK trong nhánh của mình |
@@ -1205,8 +1211,12 @@ Video có metric riêng `media_ai_video_ingress_*` và `media_ai_video_jitter_*`
 So sánh theo chặng: sender → UDP received → parsed → jitter input → released →
 pool submitted/processed. Các counter jitter audio trước đây không bao phủ video.
 `jitter_lost_total` là gap sequence, có thể trùng packet đã bị drop late; không cộng
-lost và dropped như hai tập packet độc lập. Harness strict dừng ngay khi thấy
-packet drop/lost hoặc result drop, không chỉ chờ đẳng thức drain bất khả thi.
+lost và dropped như hai tập packet độc lập. Sau jitter, `media_ai_video_decoder_*` cho biết
+decoder thấy sequence đứt bao nhiêu lần, số lần và tổng thời gian chờ IDR, số frame bị bỏ;
+log INFO `pipeline: video: đã nhận IDR sau khi mất gói` cho từng lần. Harness strict dừng
+ngay khi thấy packet drop/lost, sequence đứt ở decoder hoặc result drop, không chỉ chờ
+đẳng thức drain bất khả thi. Giả lập mất gói: `mock-video-rtp-sender --drop-packets 250,251`
+(chỉ số gói theo thứ tự gửi, sequence vẫn bị chiếm).
 
 Nếu runner cleanup sau FAIL, `context canceled` ở cuối log thường là hậu quả
 DELETE/shutdown; phải tìm lỗi đầu tiên trước đó.
@@ -1217,6 +1227,11 @@ Direct-worker mẫu ở [gateway-video-external.yaml](../config/gateway-video-ex
 segmentation 5 FPS, gesture 15 FPS, endpoint 50052 và 50053. Engine mẫu ở
 [gateway-video-engine.yaml](../config/gateway-video-engine.yaml), endpoint 50054.
 Đây là FPS cấu hình, không bảo đảm model đạt throughput tương ứng.
+
+Jitter RTP video: `video.jitter` (mẫu đầy đủ trong
+[gateway-video-ims.yaml](../config/gateway-video-ims.yaml)). `enabled: false` quay về hành vi
+cũ (video dùng `session.per_session_packet_queue` + `pipeline.*` như audio). Thiết kế và kết
+quả đo: [giai-phap-video-rtp-ingest.md](giai-phap-video-rtp-ingest.md).
 
 Kết nối gRPC tới worker/Engine được theo dõi bởi `ai.watch_reconnect` (mặc định `true`,
 áp dụng cho mọi địa chỉ trong `video.ai.workers`, `video.ai.engine_target` và

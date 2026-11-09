@@ -34,6 +34,18 @@ public:
 
     void Reset();
 
+    // Số liệu mất gói (Reset() xoá về 0).
+    // SeqGaps: số lần sequence RTP không liên tục khi Push.
+    uint64_t SeqGaps() const { return seq_gaps_; }
+    // WaitIdrDrops: số AU đã ghép xong nhưng bị bỏ vì đang chờ IDR
+    // (không tính AU hỏng trực tiếp do mất gói).
+    uint64_t WaitIdrDrops() const { return wait_idr_drops_; }
+    // WaitIdrEpisodes: số lần chuyển sang chờ IDR do mất gói/AU hỏng
+    // (không tính lần chờ IDR đầu stream).
+    uint64_t WaitIdrEpisodes() const { return wait_idr_episodes_; }
+    // WaitingForIdr: đang bỏ mọi slice cho tới IDR (kể cả lúc đầu stream).
+    bool     WaitingForIdr() const { return wait_for_idr_; }
+
 private:
     void        AppendNAL(const uint8_t* nalu, size_t size);
     void        FlushCurrentAccessUnit();
@@ -71,6 +83,11 @@ private:
     // RTP sequence tracking for gap detection
     bool     seq_initialized_   = false;
     uint16_t next_expected_seq_ = 0;
+
+    // Loss counters
+    uint64_t seq_gaps_          = 0;
+    uint64_t wait_idr_drops_    = 0;
+    uint64_t wait_idr_episodes_ = 0;
 
     std::vector<H264AccessUnit> ready_aus_;
 };
