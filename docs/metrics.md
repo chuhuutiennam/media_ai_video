@@ -316,4 +316,21 @@ Jitter video cấu hình riêng ở `video.jitter` (mặc định bật): hạn 
 lúc gói đứng sau khoảng trống đến, hết hạn thì bỏ qua cả khoảng trống một lần. Xem
 [giai-phap-video-rtp-ingest.md](giai-phap-video-rtp-ingest.md).
 
+## Stream AI video
+
+| Metric suffix sau `media_ai_video_` | Ý nghĩa |
+| --- | --- |
+| ai_streams_active | Gauge: stream gRPC tới AI video đang mở (1 mỗi session/task) |
+| ai_frames_sent_total / ai_results_received_total | Frame JPEG đã gửi / kết quả đã nhận (mask + gesture) |
+| ai_send_errors_total / ai_recv_errors_total | Lỗi gửi / nhận trên stream (worker abort, mất kết nối…) |
+| ai_result_errors_total | Kết quả nhận được nhưng mask thiếu/`status != ok` hoặc gesture không hợp lệ |
+| ai_streams_stopped_total | Stream **dừng hẳn** giữa session: hết `video.ai.stream_timeout_sec` (> 0), lỗi gRPC vĩnh viễn (vd `INVALID_ARGUMENT`), hoặc hết `video.ai.max_retry` lần mở lại liên tiếp. Session đóng bình thường không tính |
+
+Khi stream lỗi, gateway mở lại sau backoff `retry_backoff_ms × 2^(lần−1)` (tối đa 30 s); mở lại lỗi
+(vd worker chưa chạy lại) cũng tính một lần và thử tiếp. Số lần đặt lại về 0 khi stream mới nhận
+kết quả, nên `max_retry` là số lần lỗi liên tiếp. Log: Warn `ai: video recv error`, Warn
+`ai: video stream reopen failed` (`attempt`, `max_retry`), Info `ai: video stream reopened`, và khi
+dừng hẳn Warn `ai: video stream stopped` (`reason` = `stream_timeout` | `permanent_error` |
+`retries_exhausted`). `ai_streams_stopped_total` tăng nghĩa là một cuộc gọi đang chạy mà không còn AI.
+
 `media_ai_dispatcher_task_queue_len{task="default|video_segment|gesture_recognition"}` là gauge theo từng nhánh (ba giá trị label cố định). Mỗi nhánh có `result.queue_size` chỗ và `result.dispatcher_workers` worker riêng. Metric counter Dispatcher hiện tại vẫn cộng gộp các nhánh.

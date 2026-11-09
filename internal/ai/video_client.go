@@ -42,8 +42,8 @@ type VideoStreamConfig struct {
 }
 
 // VideoStream quản lý goroutine send/recv cho một AI video gRPC stream.
-// Cấu trúc và reconnect/backoff policy giống hệt Stream (audio) — xem
-// grpc_client.go — chỉ khác kiểu dữ liệu gửi đi (VideoFrame thay vì AudioChunk).
+// Cấu trúc giống Stream (audio, grpc_client.go); khác ở kết nối lại: mở lại lỗi vẫn thử tiếp,
+// max_retry tính số lần lỗi liên tiếp, và stream dừng hẳn thì log + đếm (runWithReconnect).
 type VideoStream struct {
 	SessionID string
 	StreamID  string
@@ -55,7 +55,9 @@ type VideoStream struct {
 
 	mu      sync.Mutex
 	err     error
-	retries int
+	retries int // số lần mở lại liên tiếp chưa có kết quả; về 0 khi stream mới nhận kết quả
+	// reopened: stream vừa được mở lại, chờ kết quả đầu tiên để đặt lại retries.
+	reopened atomic.Bool
 
 	sendErrors atomic.Uint64
 	recvErrors atomic.Uint64
@@ -103,6 +105,42 @@ func (s *VideoStream) clearErr() {
 // Wait block cho đến khi wrapper goroutine đã thoát.
 func (s *VideoStream) Wait() { s.wg.Wait() }
 
+// Lý do stream AI video dừng hẳn giữa session (log + media_ai_video_ai_streams_stopped_total).
+const (
+	videoStopStreamTimeout    = "stream_timeout"    // hết video.ai.stream_timeout_sec
+	videoStopPermanentError   = "permanent_error"   // mã gRPC không thử lại (vd INVALID_ARGUMENT)
+	videoStopRetriesExhausted = "retries_exhausted" // hết video.ai.max_retry lần mở lại liên tiếp
+)
+
+const videoMaxRetryBackoff = 30 * time.Second
+
+// videoRetryBackoff: base × 2^(attempt−1), tối đa 30 s; base 0 = 1 s.
+func videoRetryBackoff(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		base = time.Second
+	}
+	d := base
+	for i := 1; i < attempt && d < videoMaxRetryBackoff; i++ {
+		d *= 2
+	}
+	return min(d, videoMaxRetryBackoff)
+}
+
+// stopped ghi nhận stream dừng hẳn vì lỗi hoặc hết hạn (không gọi khi session đóng hay EOS).
+func (s *VideoStream) stopped(reason string, err error) {
+	s.mu.Lock()
+	retries := s.retries
+	s.mu.Unlock()
+	if s.totals != nil {
+		s.totals.streamsStopped.Add(1)
+	}
+	zap.L().Warn("ai: video stream stopped", zap.String("session_id", s.SessionID), zap.String("stream_id", s.StreamID),
+		zap.String("ai_service", s.aiService), zap.String("reason", reason), zap.Int("retries", retries), zap.Error(err))
+}
+
+// runWithReconnect chạy stream và mở lại khi lỗi. Mở lại lỗi (vd worker chưa chạy lại) cũng tính
+// một lượt và thử tiếp sau backoff. retries về 0 khi stream mới nhận được kết quả (runRecv), nên
+// MaxRetries giới hạn số lần lỗi liên tiếp, không phải cả đời stream.
 func (s *VideoStream) runWithReconnect(
 	ctx context.Context,
 	dialer VideoDialer,
@@ -114,55 +152,61 @@ func (s *VideoStream) runWithReconnect(
 ) {
 	defer s.wg.Done()
 
-	backoff := s.cfg.RetryBackoff
-	if backoff == 0 {
-		backoff = time.Second
-	}
-
 	for {
-		s.runPair(ctx, client, frameIn, resultOut)
+		if client != nil {
+			s.runPair(ctx, client, frameIn, resultOut)
+			client = nil
+		}
 
-		if ctx.Err() != nil {
-			return
+		if err := ctx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				s.stopped(videoStopStreamTimeout, err)
+			}
+			return // session đóng
 		}
 
 		pairErr := s.Err()
-		if pairErr == nil || s.cfg.MaxRetries == 0 {
-			return
+		if pairErr == nil {
+			return // frame input đóng hoặc EOS
 		}
 		if isPermanentGRPCError(pairErr) {
+			s.stopped(videoStopPermanentError, pairErr)
 			return
 		}
 
 		s.mu.Lock()
 		if s.retries >= s.cfg.MaxRetries {
 			s.mu.Unlock()
+			s.stopped(videoStopRetriesExhausted, pairErr)
 			return
 		}
 		s.retries++
 		attempt := s.retries
 		s.mu.Unlock()
 
+		backoff := videoRetryBackoff(s.cfg.RetryBackoff, attempt)
 		zap.L().Debug("ai: video reconnecting", zap.String("session_id", sessionID), zap.Int("attempt", attempt), zap.Duration("backoff", backoff), zap.Error(pairErr))
 
 		s.clearErr()
 
 		select {
 		case <-ctx.Done():
-			return
+			continue // đầu vòng lặp phân biệt hết hạn và session đóng
 		case <-time.After(backoff):
-		}
-
-		backoff *= 2
-		if backoff > 30*time.Second {
-			backoff = 30 * time.Second
 		}
 
 		newClient, err := dialer.Dial(ctx, sessionID, streamID, streamCfg)
 		if err != nil {
 			s.setErr(err)
-			return
+			if ctx.Err() == nil {
+				zap.L().Warn("ai: video stream reopen failed", zap.String("session_id", sessionID), zap.String("stream_id", streamID),
+					zap.String("ai_service", s.aiService), zap.Int("attempt", attempt), zap.Int("max_retry", s.cfg.MaxRetries), zap.Error(err))
+			}
+			continue
 		}
+		s.reopened.Store(true)
+		zap.L().Info("ai: video stream reopened", zap.String("session_id", sessionID), zap.String("stream_id", streamID),
+			zap.String("ai_service", s.aiService), zap.Int("attempt", attempt))
 		client = newClient
 	}
 }
@@ -300,6 +344,11 @@ func (s *VideoStream) runRecv(ctx context.Context, client VideoStreamClient, res
 			return
 		}
 
+		if s.reopened.CompareAndSwap(true, false) {
+			s.mu.Lock()
+			s.retries = 0 // stream mở lại đã chạy được: lần lỗi sau có lại đủ max_retry lượt
+			s.mu.Unlock()
+		}
 		now := time.Now().UnixMilli()
 		s.firstResultMs.CompareAndSwap(0, now-s.OpenedAt.UnixMilli())
 		if s.totals != nil {
@@ -360,6 +409,7 @@ type VideoManagerStats struct {
 	GestureResults                                                    uint64
 	GestureDropped                                                    uint64
 	MaskDropped                                                       uint64
+	StreamsStopped                                                    uint64 // stream dừng hẳn giữa session (xem videoStop*)
 }
 
 type videoCounters struct {
@@ -367,6 +417,7 @@ type videoCounters struct {
 	gestureResults                                                    atomic.Uint64
 	gestureDropped                                                    atomic.Uint64
 	maskDropped                                                       atomic.Uint64
+	streamsStopped                                                    atomic.Uint64
 }
 
 func (m *VideoManager) Stats() VideoManagerStats {
@@ -377,6 +428,7 @@ func (m *VideoManager) Stats() VideoManagerStats {
 		GestureResults: m.totals.gestureResults.Load(),
 		GestureDropped: m.totals.gestureDropped.Load(),
 		MaskDropped:    m.totals.maskDropped.Load(),
+		StreamsStopped: m.totals.streamsStopped.Load(),
 	}
 }
 
@@ -405,8 +457,15 @@ func (m *VideoManager) Open(
 		cancel()
 		ctx, cancel = context.WithTimeout(parentCtx, m.cfg.StreamTimeout)
 	}
+	aiService := streamCfg.AIService // chỉ để log
+	if aiService == "" {
+		aiService = "segmentation"
+		if streamCfg.Source != nil {
+			aiService = "source"
+		}
+	}
 	s := &VideoStream{SessionID: sessionID, StreamID: streamID, OpenedAt: time.Now(),
-		cancel: cancel, cfg: m.cfg, totals: &m.totals, sourceMode: streamCfg.Source != nil, aiService: streamCfg.AIService, gestureResultOut: streamCfg.GestureResultOut}
+		cancel: cancel, cfg: m.cfg, totals: &m.totals, sourceMode: streamCfg.Source != nil, aiService: aiService, gestureResultOut: streamCfg.GestureResultOut}
 	s.wg.Add(1)
 	m.mu.Lock()
 	if len(m.streams) >= m.cfg.MaxActiveStreams {

@@ -15,7 +15,7 @@
 #     kết quả video vào mediaResources.tAccess.callbackUrl. Xem docs/dcas-dcsf-signaling.md.
 #   - audio.enabled: false + ai.grpc_target để trống: gateway này không phục vụ audio; ANSWER
 #     speech_to_text/realtime_translation trả 400 để DCSF biết đã gửi nhầm gateway.
-#   - video.ai.stream_timeout_sec: 0 — stream AI video sống theo cuộc gọi (khác 0 = giới hạn cứng).
+#   - video.ai.stream_timeout_sec: 0 (mặc định) — stream AI video sống theo cuộc gọi (khác 0 = giới hạn cứng).
 #   - Khoá của media_ai mà repo này chưa có (bị bỏ qua nếu thêm vào): session.drain_timeout_ms,
 #     result.sink_queue_size, callback.preconnect_interval_sec, audio.resampler, log.trace,
 #     gateway.default_language, gateway.supported_target_languages, test_ai.
@@ -119,9 +119,9 @@ video:
     frame_queue_size: 8
   ai:
     max_active_streams: 200         # mẫu — trần chung mọi dịch vụ, ≥ tổng max_streams các target
-    stream_timeout_sec: 0           # 0 = stream AI sống theo cuộc gọi (mặc định 300 cắt AI sau 5 phút)
+    stream_timeout_sec: 0           # (mặc định) 0 = stream AI sống theo cuộc gọi; > 0 = cắt sau N giây, log "ai: video stream stopped"
     open_timeout_ms: 5000           # hạn chờ mở stream AI khi ANSWER (gồm mọi lần thử target); AI không phản hồi → 502 sau ≤ 5s
-    max_retry: 3                    # AI lỗi giữa cuộc gọi → chọn lại target khác (bỏ qua target chết)
+    max_retry: 3                    # AI lỗi giữa cuộc gọi → mở lại (chọn lại target, bỏ qua target chết); tối đa 3 lần lỗi liên tiếp
     retry_backoff_ms: 1000
     failover: true                  # bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác
     readiness_requires_ai: false    # true: /health/ready 503 khi một dịch vụ không còn target kết nối được

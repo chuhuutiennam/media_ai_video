@@ -55,6 +55,7 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("mask_results_dropped_total", "counter", "Mask snapshots dropped before shared result queue", st.MaskDropped)
 		write("ai_send_errors_total", "counter", "Video AI send errors", st.SendErrors)
 		write("ai_recv_errors_total", "counter", "Video AI receive errors", st.RecvErrors)
+		write("ai_streams_stopped_total", "counter", "Video AI streams that stopped for good during a session (stream timeout, permanent error or retries exhausted)", st.StreamsStopped)
 		write("ai_result_errors_total", "counter", "Video AI results with missing or unsuccessful masks", st.ResultErrors)
 	}
 }

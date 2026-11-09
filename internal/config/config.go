@@ -200,8 +200,8 @@ type GestureSection struct {
 type VideoAISection struct {
 	GRPCTarget       string `yaml:"grpc_target"`
 	MaxActiveStreams int    `yaml:"max_active_streams"`
-	StreamTimeoutSec int    `yaml:"stream_timeout_sec"`
-	MaxRetry         int    `yaml:"max_retry"`
+	StreamTimeoutSec int    `yaml:"stream_timeout_sec"` // 0 (mặc định) = stream AI sống theo cuộc gọi; > 0 = giới hạn cứng
+	MaxRetry         int    `yaml:"max_retry"`          // số lần mở lại stream liên tiếp khi lỗi (đặt lại khi có kết quả)
 	RetryBackoffMs   int    `yaml:"retry_backoff_ms"`
 
 	EngineTarget       string               `yaml:"engine_target"`
@@ -338,7 +338,7 @@ func Default() GatewayConfig {
 				OpenTimeoutMs:      5000,
 				SendTimeoutMs:      5000,
 				MaxActiveStreams:   500, // khớp ai.max_active_video_streams
-				StreamTimeoutSec:   300,
+				StreamTimeoutSec:   0,   // stream sống theo cuộc gọi (300 trước đây cắt AI sau 5 phút)
 				MaxRetry:           3,
 				RetryBackoffMs:     1000,
 				Failover:           true,
@@ -460,6 +460,10 @@ func Load(path string) (GatewayConfig, error) {
 	}
 	if cfg.RTP.PortReuseDelayMs < 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_reuse_delay_ms must be >= 0, got %d", cfg.RTP.PortReuseDelayMs)
+	}
+	if cfg.Video.AI.StreamTimeoutSec < 0 || cfg.Video.AI.MaxRetry < 0 {
+		return GatewayConfig{}, fmt.Errorf("video.ai.stream_timeout_sec and video.ai.max_retry must be >= 0, got %d, %d",
+			cfg.Video.AI.StreamTimeoutSec, cfg.Video.AI.MaxRetry)
 	}
 	if v := cfg.AI.ReconnectMaxBackoffMs; v != 0 && (v < 1000 || v > 120000) {
 		return GatewayConfig{}, fmt.Errorf("ai.reconnect_max_backoff_ms must be 0 (gRPC default) or 1000..120000, got %d", v)

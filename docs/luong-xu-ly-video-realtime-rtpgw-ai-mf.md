@@ -1041,7 +1041,7 @@ Giá trị playout mặc định:
 | AI result đến muộn | Realtime xét deadline/media TTL; arrival dời lifetime hiển thị; source dùng source timestamp sau seal; xem trace trước khi kết luận drop |
 | HTTP 5xx hoặc lỗi mạng | Sink retry theo cấu hình; hết retry trả send error |
 | HTTP 4xx | Sink không retry |
-| Worker hoặc Engine restart / mất kết nối | RTPGW WARN `ai: grpc connection lost` (addr); gRPC tự thử lại, tối đa `ai.reconnect_max_backoff_ms`; READY lại thì INFO `ai: grpc connection restored` (addr, down_ms). Stream đang chạy chỉ tự mở lại nếu lần dial lại đầu tiên thành công |
+| Worker hoặc Engine restart / mất kết nối | RTPGW WARN `ai: grpc connection lost` (addr); gRPC tự thử lại, tối đa `ai.reconnect_max_backoff_ms`; READY lại thì INFO `ai: grpc connection restored` (addr, down_ms). Stream đang chạy (chế độ gọi thẳng worker) tự mở lại sau backoff `video.ai.retry_backoff_ms × 2^(lần−1)`; mở lại lỗi vẫn thử tiếp (WARN `ai: video stream reopen failed`), thành công thì INFO `ai: video stream reopened`. `video.ai.max_retry` là số lần lỗi liên tiếp, đặt lại khi stream có kết quả. Hết lượt, lỗi vĩnh viễn hoặc hết `video.ai.stream_timeout_sec` (mặc định 0 = sống theo cuộc gọi) → WARN `ai: video stream stopped` (`reason`) + `media_ai_video_ai_streams_stopped_total` |
 | Không có reaction render khi bật require-gesture | Pixel/timeline validation FAIL dù inference và callback đã drain |
 
 ACK là lưu trong bộ nhớ process, chưa phải durable receipt qua restart. Nhật ký
