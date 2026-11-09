@@ -106,17 +106,8 @@ video:
     max_packets: 1024               # 64..65536; trần gói chờ mỗi session, vượt thì bỏ gói mới
   worker_count: 8
   job_queue_size: 1024
-  infer_width: 256
-  infer_height: 256
-  infer_fps: 5
-  frame_queue_size: 8
-  jpeg_quality: 80
-  default_effect_type: bg_replace
-  gesture:                          # thông số model gesture cho dịch vụ video_effects
-    infer_fps: 15
-    max_dimension: 640
-    max_hands: 4
-    frame_queue_size: 8
+  frame_queue_size: 8               # chung mọi dịch vụ; thông số AI (infer_*, gesture) nằm trong từng dịch vụ ở video.services
+  jpeg_quality: 80                  # chung mọi dịch vụ
   ai:
     max_active_streams: 200         # mẫu — trần chung mọi dịch vụ, ≥ tổng max_streams các target
     stream_timeout_sec: 0           # (mặc định) 0 = stream AI sống theo cuộc gọi; > 0 = cắt sau N giây, log "ai: video stream stopped"
@@ -125,11 +116,17 @@ video:
     retry_backoff_ms: 1000
     failover: true                  # bỏ qua target đang lỗi kết nối; mở stream lỗi thì thử target khác
     readiness_requires_ai: false    # true: /health/ready 503 khi một dịch vụ không còn target kết nối được
+  # Thông số AI nằm trong dịch vụ dùng nó; trường bỏ trống/0 = mặc định code. Có video.services thì
+  # video.gesture, video.infer_*, video.default_effect_type bị từ chối (gateway không khởi động).
   services:
     change_background:
       enabled: true
       legs: tcore
-      effect_type: bg_replace
+      effect_type: bg_replace       # mặc định code bg_blur
+      segmentation:                 # chỉ với ai.task video_segment
+        infer_fps: 5                # 1..60 (mặc định 5)
+        infer_width: 256            # 16..1920 (mặc định 256); kích thước JPEG gửi AI và mask
+        infer_height: 256           # 16..1920 (mặc định 256)
       ai:
         task: video_segment         # AI segmentation (repo mediapipe)
         targets: ['mediapipe-1.internal:50052', 'mediapipe-2.internal:50052']  # mẫu
@@ -137,6 +134,11 @@ video:
     video_effects:
       enabled: true
       legs: tcore
+      gesture:                      # chỉ với ai.task gesture_recognition
+        infer_fps: 15               # 1..60 (mặc định 15)
+        max_dimension: 640          # 32..1920 (mặc định 640); ≤ server.max_inference_dim của worker gesture
+        max_hands: 4                # 1..8 (mặc định 4); ghi đè num_hands của worker
+        frame_queue_size: 8         # 1..32 (mặc định 2)
       ai:
         task: gesture_recognition   # AI gesture (repo gesture)
         targets: ['gesture-1.internal:50053']  # mẫu

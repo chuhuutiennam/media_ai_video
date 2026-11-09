@@ -4,6 +4,8 @@
 #   video_effects     → repo gesture (gesture)        :50053
 # Lab không có AI thật: dùng 2 tiến trình mock-ai-worker trên 2 cổng này.
 # Không được kết hợp video.services với video.ai.workers / grpc_target / engine_target / video.gesture.enabled.
+# Thông số AI nằm trong dịch vụ dùng nó (segmentation / gesture); video.gesture, video.infer_*,
+# video.default_effect_type bị từ chối khi có video.services.
 gateway:
   id: gw-video-services
   raw_rtp_enabled: true
@@ -37,17 +39,8 @@ video:
     enabled: true                 # session.per_session_packet_queue/pipeline.* ở trên chỉ còn cho audio
   worker_count: 2
   job_queue_size: 1024
-  infer_width: 256
-  infer_height: 256
-  infer_fps: 5
-  frame_queue_size: 8
-  jpeg_quality: 80
-  default_effect_type: bg_replace
-  gesture:                        # thông số model gesture; dịch vụ video_effects khai báo ở video.services
-    infer_fps: 15
-    max_dimension: 640
-    max_hands: 4
-    frame_queue_size: 8
+  frame_queue_size: 8             # chung mọi dịch vụ
+  jpeg_quality: 80                # chung mọi dịch vụ
   ai:
     max_active_streams: 40        # giới hạn mặc định mỗi target khi services.*.ai.max_streams = 0
     max_retry: 3                  # AI lỗi giữa cuộc gọi (kể cả worker restart) → mở lại, chọn lại target; tối đa 3 lần lỗi liên tiếp, 0 = không mở lại
@@ -59,6 +52,10 @@ video:
       enabled: true
       legs: tcore                 # tcore (mặc định) | both
       effect_type: bg_replace
+      segmentation:               # thông số AI segmentation; bỏ trống/0 = mặc định code (5 fps, 256x256)
+        infer_fps: 5
+        infer_width: 256
+        infer_height: 256
       ai:
         task: video_segment       # AI segmentation (repo mediapipe)
         targets: ['127.0.0.1:50052']
@@ -66,6 +63,11 @@ video:
     video_effects:
       enabled: true
       legs: tcore
+      gesture:                    # thông số AI gesture; bỏ trống/0 = mặc định code (15 fps, 640, 4 tay, hàng đợi 2)
+        infer_fps: 15
+        max_dimension: 640
+        max_hands: 4
+        frame_queue_size: 8
       ai:
         task: gesture_recognition # AI gesture (repo gesture), khác AI của change_background
         targets: ['127.0.0.1:50053']

@@ -199,9 +199,19 @@ func main() {
 	if cfg.Video.Enabled {
 		videoPool = pipeline.NewVideoWorkerPool(cfg.ToVideoWorkerPoolConfig())
 		for name, svc := range cfg.ToVideoServices() {
-			zap.L().Info("video service configured", zap.String("service", name), zap.Bool("enabled", svc.Enabled),
+			fields := []zap.Field{zap.String("service", name), zap.Bool("enabled", svc.Enabled),
 				zap.String("ai_task", svc.AITask), zap.Bool("single_leg", svc.SingleLeg), zap.String("effect_type", svc.EffectType),
-				zap.Bool("from_video_services", len(cfg.Video.Services) != 0))
+				zap.Bool("from_video_services", len(cfg.Video.Services) != 0)}
+			// Thông số AI dịch vụ đang dùng thật (video.services.<tên>.segmentation/gesture hoặc khoá chung ở config cũ).
+			prof := coordCfg.VideoProfile(name)
+			if svc.AITask == controlplane.VideoTaskGesture {
+				fields = append(fields, zap.Int("infer_fps", prof.GestureFPS), zap.Int("max_dimension", prof.GestureMaxDimension),
+					zap.Int("max_hands", prof.GestureMaxHands), zap.Int("frame_queue_size", prof.GestureQueueSize))
+			} else {
+				fields = append(fields, zap.Int("infer_fps", prof.InferFPS), zap.Int("infer_width", prof.InferWidth),
+					zap.Int("infer_height", prof.InferHeight))
+			}
+			zap.L().Info("video service configured", fields...)
 		}
 
 		var videoDialer ai.VideoDialer
@@ -241,11 +251,11 @@ func main() {
 		}
 		videoAIMgr = ai.NewVideoManager(cfg.ToVideoAIConfig(), videoDialer)
 		coord.WithVideo(videoPool, videoAIMgr)
-		zap.L().Info("video pipeline enabled",
-			zap.Int("workers", cfg.Video.WorkerCount),
-			zap.Int("infer_fps", cfg.Video.InferFPS),
-			zap.String("default_effect", cfg.Video.DefaultEffectType),
-		)
+		pipelineFields := []zap.Field{zap.Int("workers", cfg.Video.WorkerCount)}
+		if len(cfg.Video.Services) == 0 { // config cũ / AI Engine: thông số AI chung; video.services ghi theo từng dịch vụ ở trên
+			pipelineFields = append(pipelineFields, zap.Int("infer_fps", cfg.Video.InferFPS), zap.String("default_effect", cfg.Video.DefaultEffectType))
+		}
+		zap.L().Info("video pipeline enabled", pipelineFields...)
 	}
 
 	rtpRouter := rawrtp.NewManagerRouter(sessMgr)

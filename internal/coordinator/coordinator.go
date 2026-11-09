@@ -47,6 +47,30 @@ type Config struct {
 	GestureFPS, GestureMaxDimension, GestureMaxHands, GestureQueueSize int
 	VideoEngine                                                        bool
 	VideoSourceMaxDimension                                            int
+
+	// VideoServiceProfiles: thông số AI theo dịch vụ (video.services.<tên>.segmentation/gesture), khoá là
+	// tên dịch vụ chữ thường. Dịch vụ không có trong bảng (config cũ, AI Engine, session tạo trực tiếp)
+	// dùng VideoInfer*/Gesture* ở trên.
+	VideoServiceProfiles map[string]VideoServiceProfile
+}
+
+// VideoServiceProfile: thông số AI của một dịch vụ video, đã điền đủ mặc định.
+type VideoServiceProfile struct {
+	InferWidth, InferHeight, InferFPS                                  int // segmentation
+	GestureFPS, GestureMaxDimension, GestureMaxHands, GestureQueueSize int // gesture
+}
+
+// VideoProfile trả thông số AI của dịch vụ; không có trong VideoServiceProfiles thì dùng
+// các giá trị chung (config cũ, AI Engine).
+func (cfg Config) VideoProfile(service string) VideoServiceProfile {
+	if p, ok := cfg.VideoServiceProfiles[strings.ToLower(service)]; ok {
+		return p
+	}
+	return VideoServiceProfile{
+		InferWidth: cfg.VideoInferWidth, InferHeight: cfg.VideoInferHeight, InferFPS: cfg.VideoInferFPS,
+		GestureFPS: cfg.GestureFPS, GestureMaxDimension: cfg.GestureMaxDimension,
+		GestureMaxHands: cfg.GestureMaxHands, GestureQueueSize: cfg.GestureQueueSize,
+	}
 }
 
 // DefaultConfig trả về cấu hình phù hợp cho production ASR.
@@ -204,8 +228,10 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	}
 	gestureOnly := task == videoTaskGesture
 	if gestureOnly && !c.cfg.GestureEnabled {
-		return fmt.Errorf("coordinator: gesture_recognition requires video.gesture.enabled=true")
+		return fmt.Errorf("coordinator: gesture_recognition is not configured (needs a video.services entry with ai.task gesture_recognition, or video.gesture.enabled in a config without video.services)")
 	}
+	// Thông số AI của dịch vụ (video.services.<tên>.segmentation/gesture); session tự chỉ định thì ưu tiên.
+	prof := c.cfg.VideoProfile(sess.Task)
 
 	streamID := sess.ID
 	if sess.TrackID != "" {
@@ -218,11 +244,11 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	}
 	inferW, inferH := sess.VideoInferWidth, sess.VideoInferHeight
 	if inferW == 0 || inferH == 0 {
-		inferW, inferH = c.cfg.VideoInferWidth, c.cfg.VideoInferHeight
+		inferW, inferH = prof.InferWidth, prof.InferHeight
 	}
 	inferFPS := sess.VideoInferFPS
 	if inferFPS == 0 {
-		inferFPS = c.cfg.VideoInferFPS
+		inferFPS = prof.InferFPS
 	}
 	effect := sess.EffectType
 	if gestureOnly {
@@ -244,12 +270,12 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 	var gestureQueue chan pipeline.VideoFrame
 	var gestureStream string
 	if gestureOnly && !c.cfg.VideoEngine {
-		if c.cfg.GestureFPS < 1 || c.cfg.GestureQueueSize < 1 {
+		if prof.GestureFPS < 1 || prof.GestureQueueSize < 1 {
 			return fmt.Errorf("invalid gesture profile")
 		}
-		gestureQueue = make(chan pipeline.VideoFrame, c.cfg.GestureQueueSize)
+		gestureQueue = make(chan pipeline.VideoFrame, prof.GestureQueueSize)
 		gestureStream = canonicalVideoID(sess.ID)
-		poolCfg.Gesture = &pipeline.GestureOutputConfig{StreamID: gestureStream, FPS: c.cfg.GestureFPS, MaxDimension: c.cfg.GestureMaxDimension, Output: gestureQueue}
+		poolCfg.Gesture = &pipeline.GestureOutputConfig{StreamID: gestureStream, FPS: prof.GestureFPS, MaxDimension: prof.GestureMaxDimension, Output: gestureQueue}
 	}
 	var source *ai.SourceStreamConfig
 	if c.cfg.VideoEngine {
@@ -262,8 +288,8 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 			poolCfg.InferFPS = float64(inferFPS)
 		}
 		if gestureOnly {
-			source.Gesture = &ai.VideoStreamConfig{InferFPS: c.cfg.GestureFPS, MaxHands: c.cfg.GestureMaxHands, InferWidth: c.cfg.GestureMaxDimension}
-			poolCfg.InferFPS = max(poolCfg.InferFPS, float64(c.cfg.GestureFPS))
+			source.Gesture = &ai.VideoStreamConfig{InferFPS: prof.GestureFPS, MaxHands: prof.GestureMaxHands, InferWidth: prof.GestureMaxDimension}
+			poolCfg.InferFPS = max(poolCfg.InferFPS, float64(prof.GestureFPS))
 		}
 		source.InputFPS = int(poolCfg.InferFPS)
 	}
@@ -293,7 +319,7 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		}
 	}
 	if gestureQueue != nil {
-		cfg := ai.VideoStreamConfig{AIService: "gesture_recognition", SelectedService: sess.Task, MediaEpoch: fmt.Sprintf("%s-%d", gestureStream, sess.CreatedAt.UnixNano()), InferFPS: c.cfg.GestureFPS, MaxHands: c.cfg.GestureMaxHands}
+		cfg := ai.VideoStreamConfig{AIService: "gesture_recognition", SelectedService: sess.Task, MediaEpoch: fmt.Sprintf("%s-%d", gestureStream, sess.CreatedAt.UnixNano()), InferFPS: prof.GestureFPS, MaxHands: prof.GestureMaxHands}
 		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, gestureStream, cfg, gestureQueue, sess.GestureResultQueue); err != nil {
 			c.videoAI.Close(sess.ID)
 			c.videoPool.UnregisterSession(sess.ID)

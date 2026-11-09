@@ -739,13 +739,21 @@ def data_main(folder, action, *args):
             gateway_config['video']['gesture']['enabled'] = gesture
             gateway_config['video']['ai'] = dict(engine_target=engine_target, source_max_dimension=max(640, size), max_retry=0)
         else:
-            # Danh mục dịch vụ: đúng 1 dịch vụ đang test, đúng 1 AI service của nó.
+            # Danh mục dịch vụ: đúng 1 dịch vụ đang test, đúng 1 AI service của nó. Thông số AI nằm
+            # trong dịch vụ; khoá chung video.infer_*/gesture/default_effect_type bị gateway từ chối.
+            video = gateway_config['video']
+            segmentation_params = {key: video.pop(key) for key in ('infer_fps', 'infer_width', 'infer_height')}
+            gesture_params = video.pop('gesture')
+            video.pop('default_effect_type')
             task, ai_address = ('video_segment', target) if segmentation else ('gesture_recognition', gesture_target)
             definition = {'legs': 'tcore',
                           'ai': {'task': task, 'targets': [ai_address], 'max_streams': 32}}
             if segmentation:
                 definition['effect_type'] = 'bg_replace'
-            gateway_config['video']['services'] = {service: definition}
+                definition['segmentation'] = segmentation_params
+            else:
+                definition['gesture'] = gesture_params
+            video['services'] = {service: definition}
         save('gateway.yaml', gateway_config)
         save('notify.json', {'callId': run.name, 'event': 'ANSWER', 'selectedService': service})
         return 0

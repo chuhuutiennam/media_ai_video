@@ -8,6 +8,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -188,12 +189,11 @@ type VideoJitterSection struct {
 	MaxPackets      int  `yaml:"max_packets"`       // trần gói chờ trong jitter mỗi session
 }
 
+// GestureSection: video.gesture — chỉ dùng cho config cũ và AI Engine (không có video.services).
+// Có video.services thì thông số gesture nằm ở video.services.<tên>.gesture.
 type GestureSection struct {
 	Enabled        bool `yaml:"enabled"`
-	InferFPS       int  `yaml:"infer_fps"`
-	MaxDimension   int  `yaml:"max_dimension"`
-	MaxHands       int  `yaml:"max_hands"`
-	FrameQueueSize int  `yaml:"frame_queue_size"`
+	GestureProfile `yaml:",inline"`
 }
 
 // VideoAISection cấu hình AI Stream Manager cho nhánh video.
@@ -321,7 +321,7 @@ func Default() GatewayConfig {
 			ChunkMs:          100,
 		},
 		Video: VideoSection{
-			Gesture:           GestureSection{InferFPS: 15, MaxDimension: 640, MaxHands: 4, FrameQueueSize: 2},
+			Gesture:           GestureSection{GestureProfile: GestureProfile{InferFPS: 15, MaxDimension: 640, MaxHands: 4, FrameQueueSize: 2}},
 			Enabled:           false,
 			WorkerCount:       8,
 			JobQueueSize:      1024,
@@ -447,13 +447,17 @@ func (c GatewayConfig) validateVideoJitter() error {
 // Field thiếu trong YAML giữ nguyên giá trị Default.
 func Load(path string) (GatewayConfig, error) {
 	cfg := Default()
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return GatewayConfig{}, fmt.Errorf("config: open %s: %w", path, err)
 	}
-	defer f.Close()
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
+	if err := yaml.NewDecoder(bytes.NewReader(data)).Decode(&cfg); err != nil {
 		return GatewayConfig{}, fmt.Errorf("config: decode %s: %w", path, err)
+	}
+	if len(cfg.Video.Services) != 0 {
+		if err := rejectSharedVideoAIKeys(data); err != nil {
+			return GatewayConfig{}, err
+		}
 	}
 	if cfg.RTP.EvenPorts && cfg.RTP.PortStart > 0 && cfg.RTP.PortStart%2 != 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_start must be even when rtp.even_ports=true (RTP even, RTCP = RTP+1), got %d", cfg.RTP.PortStart)
@@ -499,10 +503,12 @@ func Load(path string) (GatewayConfig, error) {
 			return GatewayConfig{}, fmt.Errorf("gesture requires video.enabled and a gesture worker in video.ai.workers or video.ai.grpc_target")
 		}
 	}
-	// Giới hạn gesture áp dụng khi gesture được dùng (config cũ hoặc dịch vụ gesture trong video.services).
-	if g := cfg.Video.Gesture; cfg.gestureInUse() &&
-		(g.InferFPS < 1 || g.InferFPS > 60 || g.MaxDimension < 32 || g.MaxDimension > 1920 || g.MaxHands < 1 || g.MaxHands > 8 || g.FrameQueueSize < 1 || g.FrameQueueSize > 32) {
-		return GatewayConfig{}, fmt.Errorf("invalid gesture FPS/dimension/hands/queue limits")
+	// Config cũ / AI Engine: giới hạn video.gesture khi bật gesture. Có video.services thì
+	// normalizeVideoServices kiểm tra thông số gesture của từng dịch vụ.
+	if cfg.Video.Gesture.Enabled {
+		if err := cfg.Video.Gesture.GestureProfile.validate("video.gesture"); err != nil {
+			return GatewayConfig{}, err
+		}
 	}
 	return cfg, nil
 }
@@ -603,6 +609,8 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		GestureEnabled:   c.gestureInUse(), GestureFPS: c.Video.Gesture.InferFPS,
 		GestureMaxDimension: c.Video.Gesture.MaxDimension, GestureMaxHands: c.Video.Gesture.MaxHands, GestureQueueSize: c.Video.Gesture.FrameQueueSize,
 		VideoEngine: c.Video.AI.EngineTarget != "", VideoSourceMaxDimension: c.Video.AI.SourceMaxDimension,
+
+		VideoServiceProfiles: c.videoServiceProfiles(),
 	}
 }
 
