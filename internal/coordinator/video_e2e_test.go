@@ -262,7 +262,9 @@ func genShortH264Packets(t *testing.T, sessionID string) []pipeline.MediaPacket 
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "testsrc2=duration=1:size=64x64:rate=10",
-		"-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
+		// -threads 1: zerolatency nhiều luồng có thể cắt mỗi frame thành nhiều slice (vd 160x120),
+		// splitAnnexBIntoFramesE2E sẽ tách nhầm thành nhiều AU. 64x64 hiện vẫn 1 slice/frame.
+		"-threads", "1", "-c:v", "libx264", "-profile:v", "baseline", "-tune", "zerolatency",
 		"-x264-params", "repeat-headers=1",
 		"-pix_fmt", "yuv420p",
 		"-f", "h264", rawPath,

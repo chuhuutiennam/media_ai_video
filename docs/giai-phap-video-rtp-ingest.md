@@ -164,4 +164,8 @@ giữ nguyên `rtp_timestamp` gốc; (3) một cờ bật/tắt. Không cần s�
 ### 6.2 Chưa làm
 
 - **C**: PLI/FIR — cần MF hỗ trợ `RTP/AVPF` + `rtcp-fb`, chốt RTCP cùng cổng hay cổng+1.
-- Fixture `coordinator/video_e2e_test.go` cũng tách 2 slice/frame thành 2 AU (chưa sửa).
+
+Ghi chú fixture test: `decoder_test.go` (160x120) bị x264 `zerolatency` nhiều luồng cắt 2 slice/frame
+(đo: 10 frame, 20 slice) nên helper tách nhầm thành 2 AU; đã sửa bằng `-threads 1` trong `de1e60b`.
+`coordinator/video_e2e_test.go` (64x64) đo ra 10 frame / 10 slice, không bị; vẫn thêm `-threads 1`
+để fixture không phụ thuộc số luồng máy hay độ phân giải.
