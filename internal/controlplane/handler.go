@@ -52,6 +52,13 @@ func (s *Server) notifyEvent(c *gin.Context) {
 // required by selectedService: audio services (serviceProfiles) get audio,
 // video services (ServerConfig.VideoServices) get video with exactly one AI task.
 func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent) {
+	// callbackUrl (URL CALL_CTRL) sai thì CALL_CTRL chắc chắn lỗi sau khi đã trả 201 và cuộc gọi
+	// bị đóng mà DCSF không biết → từ chối ngay (theo media_ai). Không log URL (có thể chứa user:password).
+	if event.CallbackURL != "" && !validCallbackURL(event.CallbackURL) {
+		zap.L().Warn("dcsf→dcas: ANSWER rejected, invalid callbackUrl", zap.String("call_id", callID))
+		c.JSON(http.StatusBadRequest, ErrorResponse{Error: "invalid callbackUrl: must be an absolute http(s) URL with host"})
+		return
+	}
 	service := strings.ToLower(event.SelectedService)
 	profile, isAudio := lookupServiceProfile(service)
 	if isAudio && s.cfg.AudioDisabled {
@@ -267,18 +274,34 @@ func (s *Server) handleAnswer(c *gin.Context, callID string, event *SessionEvent
 		if timeout == 0 {
 			timeout = 30 * time.Second
 		}
-		ctrlResultURL := s.cfg.PublicURL + "/v1/vonras/call-sessions/" + callID + "/ctrl-result"
+		ctrlResultURL := buildCtrlResultURL(s.cfg.PublicURL, callID)
 		zap.L().Debug("dcas→dcsf: call-control", zap.String("call_id", callID), zap.String("target", event.CallbackURL), zap.String("service", event.SelectedService), zap.String("ctrl_result_url", ctrlResultURL))
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			// Gắn với session của chính cuộc gọi này: DELETE (session đóng) huỷ CALL_CTRL đang chờ;
+			// lỗi chỉ đóng đúng các session ANSWER này tạo — không đóng cuộc gọi mới dùng lại callId.
+			ctx, cancel := context.WithTimeout(sessTCore.Ctx, timeout)
 			defer cancel()
-			if err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, ctrlResultURL); err != nil {
-				zap.L().Warn("call-control failed, releasing session", zap.String("call_id", callID), zap.Error(err))
-				s.sessionMgr.Close(tcoreID)
-				s.sessionMgr.Close(taccessID)
+			err := s.dcsfPool.SendCallControl(ctx, event.CallbackURL, callID, ctrlResultURL)
+			if err == nil {
+				return
+			}
+			if sessTCore.Ctx.Err() != nil {
+				zap.L().Debug("call-control cancelled: session already closed", zap.String("call_id", callID), zap.Error(err))
+				return
+			}
+			zap.L().Warn("call-control failed, releasing session", zap.String("call_id", callID), zap.Error(err))
+			s.sessionMgr.CloseSession(sessTCore)
+			if sessAccess != nil {
+				s.sessionMgr.CloseSession(sessAccess)
 			}
 		}()
 	}
+}
+
+// buildCtrlResultURL: URL DCAS nhận ctrl-result, gửi DCSF trong CALL_CTRL. callId được escape
+// (theo media_ai): callId kiểu IMS như "p2uc31@[FC00:0DB8::]" có '[' ']' không hợp lệ trong path.
+func buildCtrlResultURL(publicURL, callID string) string {
+	return publicURL + "/v1/vonras/call-sessions/" + url.PathEscape(callID) + "/ctrl-result"
 }
 
 // ServiceProfile mô tả dịch vụ audio (codec gửi DCSF và task gửi AI).

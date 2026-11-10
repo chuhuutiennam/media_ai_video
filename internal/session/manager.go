@@ -263,10 +263,18 @@ func (m *Manager) GetByTrackID(trackID string) (*Session, bool) {
 
 // Close đóng session theo ID, cancel Ctx của nó.
 // Trả về false nếu session không tồn tại.
-func (m *Manager) Close(id string) bool {
+func (m *Manager) Close(id string) bool { return m.closeMatching(id, nil) }
+
+// CloseSession đóng đúng session sess: không làm gì (false) nếu nó đã đóng hoặc ID đã thuộc về
+// session mới tạo sau (callId dùng lại). Dùng cho tác vụ chạy nền gắn với một session cụ thể
+// (vd CALL_CTRL lỗi) để không đóng nhầm cuộc gọi mới cùng callId.
+func (m *Manager) CloseSession(sess *Session) bool { return m.closeMatching(sess.ID, sess) }
+
+// closeMatching đóng session id; want != nil thì chỉ đóng khi session hiện tại đúng là want.
+func (m *Manager) closeMatching(id string, want *Session) bool {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
-	if !ok {
+	if !ok || (want != nil && s != want) {
 		m.mu.Unlock()
 		return false
 	}

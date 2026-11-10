@@ -53,6 +53,9 @@ Không chuyển sang `CallSession{TCore,TAccess Termination{Audio,Video}}`.
   không khởi động.
 - `video.ai.stream_timeout_sec` là giới hạn cứng thời gian sống của stream AI video (mặc định 300s):
   cuộc gọi dài hơn sẽ mất AI. Triển khai IMS đặt `0` — xem `config/gateway-video-ims.yaml`.
+- `callbackUrl` của ANSWER phải là `http`/`https` tuyệt đối có host, sai → 400. CALL_CTRL dùng h2c cho
+  `http://`, TLS + HTTP/2 cho `https://`; DELETE huỷ CALL_CTRL đang chờ, và CALL_CTRL lỗi chỉ đóng đúng
+  cuộc gọi của nó (không đóng cuộc gọi mới dùng lại `callId`).
 - Nếu ANSWER có `callbackUrl`, gateway gửi `CALL_CTRL` (`actions=duplicate`) đến URL đó.
   DCSF gửi `ctrl-result` về URL gateway cung cấp, chứa `mediaResources` và
   `callbackUrl` **riêng** của `tCore` / `tAccess`. Đây là URL nhận kết quả,

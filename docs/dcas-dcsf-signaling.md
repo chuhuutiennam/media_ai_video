@@ -119,7 +119,7 @@ trả lỗi.
 | `role` | string | `"originator"` \| `"terminator"` |
 | `dcasId` | string | Định danh DCAS module: `"dcas_stt"` \| `"dcas_rt"` \| `"dcas_fc"` \| `"dcas_vvc"` |
 | `callbackKey` | string | Random 16-char hex — DCSF dùng để route CALL_CTRL vào đúng Erlang process |
-| `callbackUrl` | string | URL DCAS POST CALL_CTRL về DCSF; format: `.../call-control/{dcasId}/{callbackKey}`. Bỏ trống → DCAS không gửi CALL_CTRL |
+| `callbackUrl` | string | URL DCAS POST CALL_CTRL về DCSF; format: `.../call-control/{dcasId}/{callbackKey}`. Bỏ trống → DCAS không gửi CALL_CTRL. Phải là URL `http`/`https` tuyệt đối có host, không `user:password` — sai → **400** `invalid callbackUrl`, không tạo session |
 
 **Mapping `selectedService` → codec:**
 
@@ -238,7 +238,7 @@ DCSF không nhận được gì. `open_timeout_ms: 0` tắt hạn chờ (AI khô
 
 | HTTP | Nguyên nhân |
 |---|---|
-| `400` | JSON không hợp lệ; event không nhận dạng được; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`); dịch vụ audio trên gateway chỉ video (`service <tên> is not supported by this gateway (audio.enabled=false)`) |
+| `400` | JSON không hợp lệ; event không nhận dạng được; `invalid callbackUrl: must be an absolute http(s) URL with host`; dịch vụ video khi `video.enabled=false` (`service <tên> requires video.enabled=true`); dịch vụ audio trên gateway chỉ video (`service <tên> is not supported by this gateway (audio.enabled=false)`) |
 | `409` | `callId` đã tồn tại trong session manager |
 | `503` | Gateway quá tải (`service at capacity, try again later`: ≥ 90% session, hàng đợi audio ≥ 80%, AI stream audio ≥ 95%, không có worker AI audio, heap vượt ngưỡng, hết port); đạt giới hạn session; hết RTP port (`no RTP ports available`); video không có dải port (`video requires a per-session RTP port pool`); AI của dịch vụ video hết slot hoặc mọi target mất kết nối (`no AI worker available for service <tên>`, `retry_after_ms: 3000`) |
 | `502` | Lỗi khởi động pipeline hoặc kết nối AI: audio (`pipeline: ...`), video (`video pipeline: ...`), kể cả hết hạn mở stream AI video (`... timed out after 5s ...`, `video.ai.open_timeout_ms`) |
@@ -270,9 +270,17 @@ DCSF không nhận được gì. `open_timeout_ms: 0` tắt hạn chờ (AI khô
 |---|---|---|
 | `callId` | string | ID cuộc gọi |
 | `actions` | string | Luôn là `"duplicate"` |
-| `callbackUrl` | string | URL DCSF dùng để POST ctrl-result trở lại DCAS (xem §4) |
+| `callbackUrl` | string | URL DCSF dùng để POST ctrl-result trở lại DCAS (xem §4): `{server.public_url}/v1/vonras/call-sessions/{callId}/ctrl-result`, `callId` được escape (`url.PathEscape`) — vd `p2uc31@[FC00:0DB8::]` → `p2uc31@%5BFC00:0DB8::%5D` |
 
-**Transport:** HTTP/2 cleartext (h2c), connection pool per DCSF host.
+**Transport:** HTTP/2, connection pool per DCSF host: `http://` → h2c, `https://` → TLS + ALPN h2 (CA hệ
+thống; trước đây `https://` bị gửi h2c qua TCP thường và lỗi `unexpected EOF`). Host trong `dcsf.hosts`
+được pre-warm lúc khởi động; host khác tạo client khi gặp lần đầu, tối đa 64 client động (vượt thì dùng
+chung client dự phòng).
+
+**Gắn với cuộc gọi:** CALL_CTRL chạy theo vòng đời session của cuộc gọi — DELETE (hoặc session đóng vì
+idle) huỷ ngay CALL_CTRL đang chờ, không log Warn. Khi CALL_CTRL lỗi, DCAS chỉ đóng đúng các session do
+ANSWER đó tạo: nếu `callId` đã được dùng lại cho cuộc gọi mới (DELETE rồi ANSWER lại) thì cuộc gọi mới
+không bị đóng (trước đây CALL_CTRL cũ hết hạn sẽ đóng nhầm cuộc gọi mới).
 
 ### Response kỳ vọng
 
@@ -280,7 +288,7 @@ DCSF không nhận được gì. `open_timeout_ms: 0` tắt hạn chờ (AI khô
 HTTP/1.1 200 OK
 ```
 
-Bất kỳ status nào ngoài 2xx (hoặc timeout) → DCAS log warning và đóng các session của cuộc gọi (`{callId}-tcore`, và `{callId}-taccess` nếu có).
+Bất kỳ status nào ngoài 2xx (hoặc timeout) → DCAS log warning và đóng các session của cuộc gọi (`{callId}-tcore`, và `{callId}-taccess` nếu có). Không thử lại (DCSF chặn chờ IMS-AS, gửi lại dễ trùng).
 
 **Lỗi từ DCSF:**
 
