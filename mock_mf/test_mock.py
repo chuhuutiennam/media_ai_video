@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from mf import mock
+from mock_mf import mock
 
 
 class MockMFTest(unittest.TestCase):

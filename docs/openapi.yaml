@@ -507,9 +507,21 @@ components:
           type: string
           format: uri
           description: |
-            HTTP/2 endpoint nhận ASR results cho termination này (DCSF extension).
+            HTTP/2 endpoint nhận kết quả AI cho termination này (DCSF extension).
             Gateway tạo `HTTPCallbackSink` khi field này không rỗng.
           example: "http://mf-callback.internal:8090/taccess"
+        callbackUrls:
+          type: object
+          description: |
+            Override URL theo task AI (DCSF extension). URL HTTP(S) tuyệt đối có host,
+            không chứa userinfo. Dịch vụ video một leg lấy task override từ tCore,
+            nhưng resource đích keyword là tAccess. URL /keyword đầy đủ phải khớp
+            context/termination đích. Service legs=both lấy override ở từng resource.
+          additionalProperties:
+            type: string
+            format: uri
+          example:
+            gesture_recognition: "http://mf-host:9999/nmf-mrm/v2/contexts/ctx-tAccess/termination/term-tAccess/keyword"
 
     MediaResources:
       type: object

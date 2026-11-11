@@ -2,10 +2,11 @@ openapi: "3.0.3"
 
 info:
   title: Media AI Gateway — Callback Receiver API
-  version: "1.0.0"
+  version: "1.1.0"
   description: |
-    Spec này mô tả API mà **MF (Media Function)** phải implement để nhận kết quả ASR
-    từ Media AI Gateway qua HTTP/2 callback.
+    Spec này mô tả API mà **MF (Media Function)** implement để nhận kết quả ASR
+    và gesture keyword từ Media AI Gateway qua HTTP/2 callback.
+    Keyword dùng endpoint/body riêng, không dùng envelope ASR.
 
     ## Vai trò
 
@@ -43,12 +44,79 @@ servers:
 tags:
   - name: asr
     description: ASR recognition result callbacks từ gateway
+  - name: gesture-keyword
+    description: Gesture đã chuẩn hóa thành topic_label/topic_info tại RTPGW
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path dưới đây là ví dụ representative. Đường dẫn thực tế là phần path trong
 # callback_url được DCAS cung cấp lúc tạo session (ví dụ: /asr-results, /callback, ...).
 # ─────────────────────────────────────────────────────────────────────────────
 paths:
+
+  /nmf-mrm/v2/contexts/{contextId}/termination/{terminationId}/keyword:
+    post:
+      tags: [gesture-keyword]
+      summary: Nhận keyword đã mapping từ gesture
+      operationId: receiveGestureKeyword
+      description: |
+        Contract tích hợp keyword của module hiện tại, khi callback.gesture_keywords.mode=keyword.
+        Transport HTTP/2 H2C hoặc TLS. Body đúng hai field; context/termination nằm trong URL,
+        frame/session/track/event identity nằm trong log gateway và Idempotency-Key.
+        Service video_effects một leg lấy resource đích tAccess; task URL override vẫn đặt ở
+        mediaResources.tCore.callbackUrls.gesture_recognition trong ctrl-result.
+
+        Gateway chấp nhận mọi 2xx, không đọc body ACK. MF lab trả 200 với ok/duplicate,
+        chống trùng theo context/termination/key (4096 mục, TTL 5 phút); không render effect.
+        Cùng key/body trả duplicate=true, cùng key/body khác trả 409. Gateway không retry 4xx
+        trong lần gửi đó; retry 5xx/lỗi mạng theo callback config và deadline dispatcher.
+      parameters:
+        - name: contextId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: Context MF đích; URL-encode nếu có ký tự đặc biệt.
+        - name: terminationId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 1
+          description: Termination MF đích; URL-encode nếu có ký tự đặc biệt.
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: Gateway gửi SHA-256 hex 64 ký tự; giữ nguyên key/body khi retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GestureKeywordBody"
+            example:
+              topic_label: EMOTION
+              topic_info: approve
+      responses:
+        "200":
+          description: MF lab đã ghi nhận hoặc nhận lại cùng key/body; không render keyword effect.
+          content:
+            application/json:
+              example:
+                ok: true
+                duplicate: false
+        "204":
+          description: MF khác có thể ACK 204; gateway chỉ cần status 2xx.
+        "400":
+          description: Body/resource sai, topic/info rỗng hoặc quá dài; không retry request đó.
+        "409":
+          description: MF lab phát hiện cùng context/termination/key nhưng body khác; không retry request đó.
+        "500":
+          description: MF lỗi tạm thời; gateway retry trong giới hạn cấu hình và deadline.
 
   /asr-results:
     post:
@@ -142,6 +210,28 @@ paths:
 components:
 
   schemas:
+    GestureKeywordBody:
+      type: object
+      additionalProperties: false
+      required: [topic_label, topic_info]
+      description: |
+        Hai chuỗi không rỗng/không toàn khoảng trắng, tối đa 128 byte UTF-8 mỗi field.
+        Không kèm frame_id, contextId, terminationId, tọa độ, TTL hoặc event_type.
+        MF lab ghi effect=unmapped nếu topic/info tùy chỉnh chưa có effect tương ứng.
+      properties:
+        topic_label:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '\S'
+          example: EMOTION
+        topic_info:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '\S'
+          example: approve
+
 
     CallbackBody:
       type: object

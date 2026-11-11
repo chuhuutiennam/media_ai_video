@@ -2,6 +2,39 @@
 
 Khi tạo session với `callback_url`, gateway sẽ **POST** kết quả nhận dạng tới URL đó theo từng kết quả trả về từ AI worker.
 
+## Gesture → keyword: contract riêng
+
+Các mục 1–9 bên dưới mô tả callback ASR. Với
+`callback.gesture_keywords.mode: keyword`, gesture được chuẩn hóa tại RTPGW rồi
+gửi MF bằng HTTP/2 tới:
+
+```http
+POST /nmf-mrm/v2/contexts/{contextId}/termination/{terminationId}/keyword
+Content-Type: application/json
+Idempotency-Key: <SHA-256 hex, giữ nguyên qua retry>
+```
+
+```json
+{"topic_label":"EMOTION","topic_info":"approve"}
+```
+
+Body có đúng hai field, không dùng envelope ASR/legacy gesture. ID resource
+nằm trong URL; gateway không gửi frame/track/tọa độ/TTL trong body. Dịch vụ
+`video_effects` một leg nhận RTP tCore, gửi keyword tới resource **tAccess**;
+task override URL lấy từ `mediaResources.tCore.callbackUrls.gesture_recognition`.
+Tạo resource/callback bằng ctrl-result trước khi phát media.
+
+Gateway đánh dấu event đã gửi sau ACK 2xx; retry 5xx/lỗi mạng theo callback
+config và deadline dispatcher, không retry 4xx trong lần gửi đó. MF lab ghi
+`keyword_received` trước ACK, chống trùng key và chọn effect để log, chưa vẽ
+effect keyword lên MP4. Legacy gesture vẫn dùng snapshot callback riêng.
+
+Mapping đầy đủ, cấu hình, ví dụ ctrl-result và cách test lab xem
+[Gesture → MF keyword hiện tại](video-testing.md#gesture--mf-keyword-trong-module-hiện-tại).
+Schema endpoint xem [OpenAPI callback](openapi-callback.yaml).
+Terminal lab chỉ in START/END khi gesture đổi; chi tiết mapping/skip/ACK nằm
+trong `gateway.log`, receipt MF trong `mf-events.jsonl`.
+
 ---
 
 ## 1. Tổng quan luồng

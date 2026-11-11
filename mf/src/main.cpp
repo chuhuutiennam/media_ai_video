@@ -46,6 +46,8 @@ int main(int argc, char** argv) {
                              "       [--gesture-render-mode realtime|arrival|source]\n"
                              "       [--result-capacity 4096 --recording-capacity 32]\n"
                              "POST /start/{tCore,tAccess} before RTP. ACK results without rendering.\n"
+                             "Keyword mock: POST /nmf-mrm/v2/contexts/{contextId}/termination/{terminationId}/keyword\n"
+                             "Features: keyword-mock (logs effect selection; keyword effects are not rendered).\n"
                              "--legs: legs that must render before /finalize (default 2; 1 for single-leg services:\n"
                              "        one gateway session <call>-tcore whose results arrive on the routed MF leg).\n"
                              "Realtime output frames are immutable and recorded once.\n"

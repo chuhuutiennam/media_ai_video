@@ -22,15 +22,17 @@ import (
 
 // Config cấu hình pipeline mỗi session.
 type Config struct {
-	JitterConfig    jitter.Config
-	JitterOutSize   int                        // cap của channel jitterOut (jitter buffer → WorkerPool); default 16
-	OutSampleRate   int                        // Hz sau resample (ví dụ: 16000)
-	OutChannels     int                        // kênh đầu ra (thường 1 = mono)
-	ChunkMs         int                        // độ dài AudioChunk gửi AI (ms)
-	CallbackTimeout time.Duration              // timeout mỗi HTTP callback request (dùng khi CallbackClient = nil)
-	CallbackRetry   int                        // số lần retry HTTP callback (không kể lần đầu)
-	PCMDumpDir      string                     // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
-	CallbackClient  *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
+	JitterConfig         jitter.Config
+	JitterOutSize        int           // cap của channel jitterOut (jitter buffer → WorkerPool); default 16
+	OutSampleRate        int           // Hz sau resample (ví dụ: 16000)
+	OutChannels          int           // kênh đầu ra (thường 1 = mono)
+	ChunkMs              int           // độ dài AudioChunk gửi AI (ms)
+	CallbackTimeout      time.Duration // timeout mỗi HTTP callback request (dùng khi CallbackClient = nil)
+	CallbackRetry        int           // số lần retry HTTP callback (không kể lần đầu)
+	CallbackRetryBackoff time.Duration
+	GestureKeywords      result.GestureKeywordConfig
+	PCMDumpDir           string                     // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
+	CallbackClient       *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
 
 	// Jitter của track video (config video.jitter). VideoJitterConfig.PacketTimeMs == 0 → dùng
 	// JitterConfig/JitterOutSize như audio.
@@ -149,6 +151,9 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 	if sess.CallbackURL != "" {
 		cbSink = c.newCallbackSink(sess.CallbackURL)
 		c.dispatcher.RegisterSink(sess.ID, cbSink)
+	}
+	if sess.VideoEnabled && c.cfg.GestureKeywords.Mode == "keyword" && c.cfg.GestureKeywords.BaseURL != "" {
+		c.UpdateTaskCallbackSink(sess.ID, "gesture_recognition", c.cfg.GestureKeywords.BaseURL)
 	}
 
 	if sess.Codec != "" {
@@ -557,6 +562,9 @@ func (c *Coordinator) UpdateCallbackSink(sessID, newURL string) *result.HTTPCall
 // the session fallback. Empty URL restores the fallback.
 func (c *Coordinator) UpdateTaskCallbackSink(sessID, task, rawURL string) *result.HTTPCallbackSink {
 	var sink *result.HTTPCallbackSink
+	if rawURL == "" && task == "gesture_recognition" && c.cfg.GestureKeywords.Mode == "keyword" {
+		rawURL = c.cfg.GestureKeywords.BaseURL
+	}
 	if rawURL != "" {
 		sink = c.newCallbackSink(rawURL)
 	}
@@ -601,10 +609,16 @@ func (c *Coordinator) StartMockResultPump(sess *session.Session, terminationID s
 
 // newCallbackSink tạo HTTPCallbackSink dùng shared client nếu có, hoặc per-sink transport.
 func (c *Coordinator) newCallbackSink(rawURL string) *result.HTTPCallbackSink {
+	var sink *result.HTTPCallbackSink
 	if c.cfg.CallbackClient != nil {
-		return c.cfg.CallbackClient.NewHTTPCallbackSink(rawURL, c.cfg.CallbackRetry)
+		sink = c.cfg.CallbackClient.NewHTTPCallbackSink(rawURL, c.cfg.CallbackRetry)
+	} else {
+		sink = result.NewHTTPCallbackSink(rawURL, c.cfg.CallbackTimeout, c.cfg.CallbackRetry)
 	}
-	return result.NewHTTPCallbackSink(rawURL, c.cfg.CallbackTimeout, c.cfg.CallbackRetry)
+	if c.cfg.CallbackRetryBackoff > 0 {
+		sink.RetryBackoff = c.cfg.CallbackRetryBackoff
+	}
+	return sink.WithGestureKeywords(c.cfg.GestureKeywords)
 }
 
 // AggregateJitterStats trả về tổng hợp jitter stats từ tất cả session đang active.

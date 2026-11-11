@@ -214,6 +214,7 @@ type HTTPCallbackSink struct {
 	failing        atomic.Bool         // lần gửi gần nhất lỗi (dispatcher log Warn khi bắt đầu lỗi, Info khi hồi phục)
 	retries        atomic.Uint64       // tổng số lần retry đã thực hiện
 	pool           *CallbackHTTPClient // shared per-task transports, pooled across sessions
+	keywords       *gestureKeywordSink
 }
 
 // Retries trả về tổng số lần retry đã thực hiện (không tính lần gửi đầu tiên).
@@ -280,6 +281,13 @@ func (s *HTTPCallbackSink) Type() string { return "http_callback" }
 // Send POST result tới s.URL với retry. Context-aware: dừng ngay khi ctx done.
 // Khi hết retry mà vẫn lỗi, forward sang DeadLetter sink nếu có.
 func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResult) error {
+	if s.keywords != nil && s.keywords.cfg.Mode == "keyword" && r.IsVideoGesture() {
+		err := s.sendGestureKeywords(ctx, r)
+		if err != nil && s.DeadLetter != nil {
+			return s.DeadLetter.Send(ctx, r)
+		}
+		return err
+	}
 	body, err := json.Marshal(newCallbackPayload(r))
 	if err != nil {
 		return fmt.Errorf("http_callback: marshal: %w", err)
@@ -293,6 +301,12 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 		zap.Int("body_bytes", len(body)),
 	)
 
+	return s.post(ctx, r, s.URL, body, "")
+}
+
+// post shares retry, per-attempt deadlines and per-task HTTP/2 pools between
+// legacy callbacks and keyword requests. Retries keep the same body and key.
+func (s *HTTPCallbackSink) post(ctx context.Context, r pipeline.RecognitionResult, destination string, body []byte, idempotencyKey string) error {
 	var lastErr error
 	for attempt := 0; attempt <= s.MaxRetry; attempt++ {
 		if attempt > 0 {
@@ -309,12 +323,18 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 		if s.AttemptTimeout > 0 {
 			reqCtx, reqCancel = context.WithTimeout(ctx, s.AttemptTimeout)
 		}
-		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, s.URL, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, destination, bytes.NewReader(body))
 		if err != nil {
 			reqCancel()
 			return fmt.Errorf("http_callback: build request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if idempotencyKey != "" {
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+			zap.L().Info("keyword: http request", zap.String("session_id", r.SessionID),
+				zap.String("idempotency_key", idempotencyKey), zap.String("method", http.MethodPost), zap.String("url", destination),
+				zap.Int("attempt", attempt+1), zap.ByteString("body", body))
+		}
 		client := s.client
 		if s.pool != nil {
 			client = s.pool.clientFor(r)
@@ -323,9 +343,18 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 		reqCancel()
 		if err != nil {
 			lastErr = fmt.Errorf("http_callback: request: %w", err)
+			if idempotencyKey != "" {
+				zap.L().Warn("keyword: http error", zap.String("session_id", r.SessionID),
+					zap.String("idempotency_key", idempotencyKey), zap.Int("attempt", attempt+1), zap.Error(err))
+			}
 			continue // network error → retry
 		}
 		resp.Body.Close()
+		if idempotencyKey != "" {
+			zap.L().Info("keyword: http response", zap.String("session_id", r.SessionID),
+				zap.String("idempotency_key", idempotencyKey), zap.Int("attempt", attempt+1),
+				zap.Int("status", resp.StatusCode), zap.String("protocol", resp.Proto))
+		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			return nil
@@ -337,8 +366,9 @@ func (s *HTTPCallbackSink) Send(ctx context.Context, r pipeline.RecognitionResul
 		// 5xx: server error → retry
 	}
 
-	// Hết retry: forward sang dead-letter sink nếu có.
-	if s.DeadLetter != nil {
+	// Keep legacy dead-letter handling limited to exhausted retries. Keyword
+	// failures are handled for the whole snapshot by Send(), after mapping.
+	if idempotencyKey == "" && s.DeadLetter != nil {
 		return s.DeadLetter.Send(ctx, r)
 	}
 	return lastErr

@@ -356,11 +356,14 @@ func main() {
 		}
 		zap.L().Info("HTTP/2 control plane listening", zap.String("addr", cfg.Server.HTTPAddr), zap.String("mode", mode))
 		httpDone <- apiSrv.ListenAndServe(ctx)
+		// A failed HTTP listener must stop the gateway immediately, so its error
+		// is reported without waiting for an external shutdown signal.
+		stop()
 	}()
 
 	// ── shutdown ───────────────────────────────────────────────────────────
 	<-ctx.Done()
-	zap.L().Info("signal received, shutting down")
+	zap.L().Info("shutting down")
 
 	select {
 	case err := <-httpDone:

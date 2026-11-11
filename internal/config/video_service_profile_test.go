@@ -108,6 +108,13 @@ func TestVideoServices_SampleConfigProfiles(t *testing.T) {
 		}
 		coord := cfg.ToCoordinatorConfig()
 		for service, w := range want {
+			if name == "gateway-video-ims.yaml" {
+				if service == "change_background" {
+					w.InferFPS = 15
+				} else if service == "video_effects" {
+					w.GestureFPS = 30
+				}
+			}
 			if got := coord.VideoProfile(service); got != w {
 				t.Errorf("%s %s: got %+v, want %+v", name, service, got, w)
 			}

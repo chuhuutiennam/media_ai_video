@@ -1,5 +1,6 @@
 #include "callback_server.hpp"
 #include "renderer.hpp"
+#include "keyword_receiver.hpp"
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -85,6 +86,7 @@ void validate_gesture(const json& g) {
 }
 
 struct Service {
+    KeywordReceiver keywords;
     std::string call_id, frames_root, background;
     std::string emoji_directory;
     bool require_masks=true;
@@ -103,7 +105,7 @@ struct Service {
             done = done && legs[item.first].at("finalized").get<bool>();
             if (!legs[item.first].at("error").get<std::string>().empty()) ++failures;
         }
-        return {{"legs", legs}, {"received", received}, {"errors", failures}, {"finalized", done}, {"realtime", playout.gesture_render_mode != "source"}, {"gesture_render_mode", playout.gesture_render_mode}};
+        return {{"legs", legs}, {"received", received}, {"keywords_received", keywords.received()}, {"keyword_duplicates", keywords.duplicates()}, {"errors", failures}, {"finalized", done}, {"realtime", playout.gesture_render_mode != "source"}, {"gesture_render_mode", playout.gesture_render_mode}};
     }
 
     void emit(const json& event) {
@@ -111,9 +113,12 @@ struct Service {
         out << event.dump() << std::endl;
         if (!out) throw std::runtime_error("cannot write MF event log");
     }
-    std::pair<int, json> handle(const std::string& method, const std::string& path, const std::string& body) {
+    std::pair<int, json> handle(const std::string& method, const std::string& path, const std::string& body, const std::string& key) {
         if (method == "HEAD" && path == "/") return {200, json::object()};
         if (method == "GET" && path == "/status") return {200, status()};
+        if (KeywordReceiver::matches(path)) {
+            return keywords.handle(method, path, body, key, [this](const json& event) { emit(event); });
+        }
         if (method == "POST" && (path == "/start/tCore" || path == "/start/tAccess")) {
             if (frames_root.empty()) return {409, {{"error", "source playout requires frames-root"}}};
             const std::string leg = path.substr(7), suffix = leg == "tCore" ? "tcore" : "taccess";
@@ -193,7 +198,7 @@ struct Service {
 };
 
 struct Request {
-    std::string method, path, body, response;
+    std::string method, path, body, response, idempotency_key;
     size_t sent = 0, header_bytes = 0;
     bool too_large = false, responded = false;
 };
@@ -238,6 +243,7 @@ int header(nghttp2_session*, const nghttp2_frame* frame, const uint8_t* name, si
         const std::string key(reinterpret_cast<const char*>(name), namelen);
         if (key == ":path") request.path.assign(reinterpret_cast<const char*>(value), valuelen);
         if (key == ":method") request.method.assign(reinterpret_cast<const char*>(value), valuelen);
+        if (key == "idempotency-key") request.idempotency_key.assign(reinterpret_cast<const char*>(value), valuelen);
         return 0;
     } catch (...) { return NGHTTP2_ERR_CALLBACK_FAILURE; }
 }
@@ -275,7 +281,7 @@ int frame_received(nghttp2_session* session, const nghttp2_frame* frame, void* u
         request.responded = true;
         auto response = request.too_large
             ? std::make_pair(413, json{{"error", "callback body too large"}})
-            : connection.service.handle(request.method, request.path, request.body);
+            : connection.service.handle(request.method, request.path, request.body, request.idempotency_key);
         request.response = response.second.dump();
         const std::string status = std::to_string(response.first);
         auto nv = [](const char* name, const char* value) {

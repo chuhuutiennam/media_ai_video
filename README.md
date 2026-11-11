@@ -164,8 +164,10 @@ docker build -f deploy/Dockerfile --build-arg GO_TAGS="" -t registry.local/media
 | File | Mô tả |
 |------|-------|
 | [docs/openapi.yaml](docs/openapi.yaml) | OpenAPI 3.0.3 spec — tất cả REST endpoints của gateway (sessions, WebRTC, health, metrics) |
-| [docs/openapi-callback.yaml](docs/openapi-callback.yaml) | OpenAPI 3.0.3 spec — Callback Receiver API mà **MF** phải implement để nhận ASR kết quả |
+| [docs/openapi-callback.yaml](docs/openapi-callback.yaml) | OpenAPI 3.0.3 — MF nhận callback ASR và gesture keyword |
 | [docs/callback.md](docs/callback.md) | Callback message reference — HTTP/2 POST format, JSON schema, retry policy, drop policy, implement guide |
+| [docs/video-testing.md](docs/video-testing.md#gesture--mf-keyword-trong-module-hiện-tại) | Gesture → keyword hiện tại: mapping, config, ctrl-result, retry, log START/END và E2E lab |
+| [docs/thiet-ke-e2e-gesture-segmentation-keyword.md](docs/thiet-ke-e2e-gesture-segmentation-keyword.md) | Thiết kế tham khảo từ project nguồn, có hai task/hai leg; xem phạm vi ở đầu tài liệu |
 | [docs/metrics.md](docs/metrics.md) | Prometheus metrics reference — 37 metric, ý nghĩa, alert threshold, drop rate |
 | [docs/media-ai-gateway-design-modules_v2.md](docs/media-ai-gateway-design-modules_v2.md) | Thiết kế kiến trúc hiện hành — module breakdown, luồng dữ liệu, API, config đầy đủ |
 | [docs/media-ai-gateway-design-modules_v1.md](docs/media-ai-gateway-design-modules_v1.md) | Phiên bản thiết kế ban đầu (tham khảo) |

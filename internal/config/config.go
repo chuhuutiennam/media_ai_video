@@ -243,12 +243,13 @@ type ResultSection struct {
 
 // CallbackSection cấu hình HTTP callback sink.
 type CallbackSection struct {
-	URL               string `yaml:"url"` // optional: pre-connect target khi app khởi động
-	TimeoutMs         int    `yaml:"timeout_ms"`
-	MaxRetry          int    `yaml:"max_retry"`
-	RetryBackoffMs    int    `yaml:"retry_backoff_ms"`
-	ReadIdleTimeoutMs int    `yaml:"read_idle_timeout_ms"` // gửi H/2 PING sau N ms idle; 0 = không ping
-	PingTimeoutMs     int    `yaml:"ping_timeout_ms"`      // đóng conn nếu không nhận PONG sau N ms
+	GestureKeywords   result.GestureKeywordConfig `yaml:"gesture_keywords"`
+	URL               string                      `yaml:"url"` // optional: pre-connect target khi app khởi động
+	TimeoutMs         int                         `yaml:"timeout_ms"`
+	MaxRetry          int                         `yaml:"max_retry"`
+	RetryBackoffMs    int                         `yaml:"retry_backoff_ms"`
+	ReadIdleTimeoutMs int                         `yaml:"read_idle_timeout_ms"` // gửi H/2 PING sau N ms idle; 0 = không ping
+	PingTimeoutMs     int                         `yaml:"ping_timeout_ms"`      // đóng conn nếu không nhận PONG sau N ms
 }
 
 // PCAPSection cấu hình PCAP packet capture (Linux only, AF_PACKET).
@@ -372,6 +373,7 @@ func Default() GatewayConfig {
 			SendTimeoutMs:       2000,
 		},
 		Callback: CallbackSection{
+			GestureKeywords:   result.DefaultGestureKeywordConfig(),
 			TimeoutMs:         1000,
 			MaxRetry:          3,
 			RetryBackoffMs:    200,
@@ -458,6 +460,9 @@ func Load(path string) (GatewayConfig, error) {
 		if err := rejectSharedVideoAIKeys(data); err != nil {
 			return GatewayConfig{}, err
 		}
+	}
+	if err := cfg.Callback.GestureKeywords.Validate(); err != nil {
+		return GatewayConfig{}, fmt.Errorf("callback.gesture_keywords: %w", err)
 	}
 	if cfg.RTP.EvenPorts && cfg.RTP.PortStart > 0 && cfg.RTP.PortStart%2 != 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_start must be even when rtp.even_ports=true (RTP even, RTCP = RTP+1), got %d", cfg.RTP.PortStart)
@@ -575,6 +580,7 @@ func (c GatewayConfig) ToAIConfig() ai.Config {
 // ToDispatcherConfig chuyển đổi sang result.Config.
 func (c GatewayConfig) ToDispatcherConfig() result.Config {
 	return result.Config{
+		OrderedGestures:     c.Callback.GestureKeywords.Mode == "keyword",
 		Workers:             c.Result.DispatcherWorkers,
 		QueueSize:           c.Result.QueueSize,
 		DropPartialWhenFull: c.Result.DropPartialWhenFull,
@@ -591,14 +597,16 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 	}
 	videoJitter, videoJitterOut := c.videoJitter(audioJitter)
 	return coordinator.Config{
-		JitterConfig:    audioJitter,
-		JitterOutSize:   c.Pipeline.JitterOutQueueSize,
-		OutSampleRate:   c.Audio.OutputSampleRate,
-		OutChannels:     c.Audio.OutputChannels,
-		ChunkMs:         c.Audio.ChunkMs,
-		CallbackTimeout: time.Duration(c.Callback.TimeoutMs) * time.Millisecond,
-		CallbackRetry:   c.Callback.MaxRetry,
-		PCMDumpDir:      c.Audio.PCMDumpDir,
+		JitterConfig:         audioJitter,
+		JitterOutSize:        c.Pipeline.JitterOutQueueSize,
+		OutSampleRate:        c.Audio.OutputSampleRate,
+		OutChannels:          c.Audio.OutputChannels,
+		ChunkMs:              c.Audio.ChunkMs,
+		CallbackTimeout:      time.Duration(c.Callback.TimeoutMs) * time.Millisecond,
+		CallbackRetry:        c.Callback.MaxRetry,
+		CallbackRetryBackoff: time.Duration(c.Callback.RetryBackoffMs) * time.Millisecond,
+		GestureKeywords:      c.Callback.GestureKeywords,
+		PCMDumpDir:           c.Audio.PCMDumpDir,
 
 		VideoJitterConfig: videoJitter, VideoJitterOutSize: videoJitterOut,
 		VideoMaxWidth: c.Video.MaxWidth, VideoMaxHeight: c.Video.MaxHeight,

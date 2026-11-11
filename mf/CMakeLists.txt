@@ -14,7 +14,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil libswscal
 find_package(nlohmann_json 3.2 REQUIRED)
 
 # Receive HTTP/2 masks and composite source frames with FFmpeg image I/O.
-add_executable(mf_cpp src/main.cpp src/callback_server.cpp src/renderer.cpp src/image.cpp)
+add_executable(mf_cpp src/main.cpp src/callback_server.cpp src/keyword_receiver.cpp src/renderer.cpp src/image.cpp)
 target_include_directories(mf_cpp PRIVATE include)
 target_link_libraries(mf_cpp PRIVATE Threads::Threads PkgConfig::NGHTTP2 PkgConfig::FFMPEG nlohmann_json::nlohmann_json)
 target_compile_options(mf_cpp PRIVATE -Wall -Wextra -Wpedantic)
@@ -22,6 +22,11 @@ install(TARGETS mf_cpp RUNTIME DESTINATION bin)
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(mf_keyword_test tests/keyword_receiver_test.cpp src/keyword_receiver.cpp)
+    target_include_directories(mf_keyword_test PRIVATE include)
+    target_link_libraries(mf_keyword_test PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(mf_keyword_test PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME keyword_receiver COMMAND mf_keyword_test)
     add_executable(mf_gesture_test tests/gesture_renderer_test.cpp src/renderer.cpp src/image.cpp)
     target_include_directories(mf_gesture_test PRIVATE include)
     target_link_libraries(mf_gesture_test PRIVATE Threads::Threads PkgConfig::FFMPEG nlohmann_json::nlohmann_json)

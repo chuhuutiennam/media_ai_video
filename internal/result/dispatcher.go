@@ -13,6 +13,7 @@ import (
 
 // Config giữ cấu hình cho Dispatcher.
 type Config struct {
+	OrderedGestures     bool // keyword callbacks use one FIFO consumer per session
 	Workers             int
 	QueueSize           int
 	DropPartialWhenFull bool
@@ -63,21 +64,29 @@ type Dispatcher struct {
 	sentFinal   atomic.Uint64
 	sendErrors  atomic.Uint64
 
-	maskQueue    chan pipeline.RecognitionResult
-	gestureQueue chan pipeline.RecognitionResult
-	taskHTTP     map[string]map[string]*HTTPCallbackSink // optional task URL overrides
+	maskQueue     chan pipeline.RecognitionResult
+	gestureQueue  chan pipeline.RecognitionResult
+	gestureShards []chan pipeline.RecognitionResult
+	taskHTTP      map[string]map[string]*HTTPCallbackSink // optional task URL overrides
 }
 
 // NewDispatcher tạo Dispatcher với config cho trước.
 func NewDispatcher(cfg Config) *Dispatcher {
-	return &Dispatcher{
-		cfg:          cfg,
-		queue:        make(chan pipeline.RecognitionResult, cfg.QueueSize),
-		maskQueue:    make(chan pipeline.RecognitionResult, cfg.QueueSize),
-		gestureQueue: make(chan pipeline.RecognitionResult, cfg.QueueSize),
-		sinks:        make(map[string][]Sink),
-		taskHTTP:     make(map[string]map[string]*HTTPCallbackSink),
+	d := &Dispatcher{
+		cfg:       cfg,
+		queue:     make(chan pipeline.RecognitionResult, cfg.QueueSize),
+		maskQueue: make(chan pipeline.RecognitionResult, cfg.QueueSize),
+		sinks:     make(map[string][]Sink),
+		taskHTTP:  make(map[string]map[string]*HTTPCallbackSink),
 	}
+	if cfg.OrderedGestures && cfg.Workers > 0 {
+		for i := 0; i < cfg.Workers; i++ {
+			d.gestureShards = append(d.gestureShards, make(chan pipeline.RecognitionResult, max(1, (cfg.QueueSize+cfg.Workers-1)/cfg.Workers)))
+		}
+	} else {
+		d.gestureQueue = make(chan pipeline.RecognitionResult, cfg.QueueSize)
+	}
+	return d
 }
 
 // RegisterSink thêm một sink cho session.
@@ -134,7 +143,11 @@ func (d *Dispatcher) Push(ctx context.Context, r pipeline.RecognitionResult) err
 // Mọi worker thoát sạch sau khi ctx bị cancel.
 func (d *Dispatcher) Run(ctx context.Context) {
 	var wg sync.WaitGroup
-	for _, queue := range []chan pipeline.RecognitionResult{d.queue, d.maskQueue, d.gestureQueue} {
+	queues := []chan pipeline.RecognitionResult{d.queue, d.maskQueue}
+	if len(d.gestureShards) == 0 {
+		queues = append(queues, d.gestureQueue)
+	}
+	for _, queue := range queues {
 		for i := 0; i < d.cfg.Workers; i++ {
 			wg.Add(1)
 			go func() {
@@ -142,6 +155,10 @@ func (d *Dispatcher) Run(ctx context.Context) {
 				d.worker(ctx, queue)
 			}()
 		}
+	}
+	for _, queue := range d.gestureShards {
+		wg.Add(1)
+		go func() { defer wg.Done(); d.worker(ctx, queue) }()
 	}
 	wg.Wait()
 }
@@ -264,7 +281,9 @@ func (d *Dispatcher) ReplaceHTTPSink(sessionID string, sink *HTTPCallbackSink) {
 }
 
 // QueueLen trả về số result đang chờ trong queue.
-func (d *Dispatcher) QueueLen() int { return len(d.queue) + len(d.maskQueue) + len(d.gestureQueue) }
+func (d *Dispatcher) QueueLen() int {
+	return len(d.queue) + len(d.maskQueue) + d.TaskQueueLen("gesture_recognition")
+}
 
 // TaskQueueLen exposes each bounded callback lane without session labels.
 func (d *Dispatcher) TaskQueueLen(task string) int {
@@ -272,7 +291,11 @@ func (d *Dispatcher) TaskQueueLen(task string) int {
 	case "video_segment":
 		return len(d.maskQueue)
 	case "gesture_recognition":
-		return len(d.gestureQueue)
+		n := len(d.gestureQueue)
+		for _, queue := range d.gestureShards {
+			n += len(queue)
+		}
+		return n
 	default:
 		return len(d.queue)
 	}
@@ -280,6 +303,14 @@ func (d *Dispatcher) TaskQueueLen(task string) int {
 
 func (d *Dispatcher) queueFor(r pipeline.RecognitionResult) chan pipeline.RecognitionResult {
 	if r.IsVideoGesture() {
+		if len(d.gestureShards) > 0 {
+			// FNV-1a provides session affinity without retaining session IDs.
+			h := uint32(2166136261)
+			for i := 0; i < len(r.SessionID); i++ {
+				h = (h ^ uint32(r.SessionID[i])) * 16777619
+			}
+			return d.gestureShards[int(h)%len(d.gestureShards)]
+		}
 		return d.gestureQueue
 	}
 	if r.IsVideoMask() {
