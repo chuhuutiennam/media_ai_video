@@ -65,6 +65,7 @@ session:
   per_session_audio_queue:  80      # 80 × 100ms = 8s — đủ cover AI reconnect cycle (max 7s backoff)
   per_session_result_queue: 32      # dispatcher xử lý nhanh, 32 là đủ
   per_session_egress_queue: 300     # 300 × 20ms = 6s — IMS call có utterance dài hơn (dịch thuật)
+  reuse_wait_ms:            2000    # callId dùng lại ngay: chờ session cũ giải phóng xong tối đa N ms (1..60000)
 
 # ── Audio pipeline ────────────────────────────────────────────────────────────
 # AMR-WB: RTP payload 8kHz/20ms → decode → PCM 16kHz → gửi AI

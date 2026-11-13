@@ -61,6 +61,7 @@ session:
   per_session_packet_queue: 128  # kích thước queue RTP packet per-session
   per_session_audio_queue: 128   # kích thước queue audio chunk per-session
   per_session_result_queue: 64   # kích thước queue ASR result per-session
+  reuse_wait_ms: 2000            # session dùng lại ID vừa đóng chờ session cũ giải phóng xong tối đa N ms (1..60000), quá thì lỗi
 
 # ── Audio pipeline & jitter buffer ────────────────────────────────────────────
 pipeline:

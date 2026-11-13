@@ -67,6 +67,10 @@ type sessionVideoPipeline struct {
 	decodeErrs    atomic.Uint64
 	nativeErrors  uint64 // native decoder counters already accumulated; protected by mu
 
+	// Frame decoder bỏ vì vượt video.max_width/max_height (không tính vào decodeErrs).
+	oversizeFrames atomic.Uint64
+	nativeOversize uint64 // counter native đã cộng; protected by mu
+
 	// Mất gói / chờ IDR: counter cộng dồn (worker pool lấy delta) và đợt chờ hiện tại.
 	packetGaps       atomic.Uint64
 	waitDrops        atomic.Uint64
@@ -137,6 +141,7 @@ func (sp *sessionVideoPipeline) push(pkt MediaPacket) {
 			atMs = time.Now().UnixMilli()
 		}
 		sp.trackLoss(st, atMs)
+		sp.trackOversize(st)
 	}()
 
 	sp.packetsIn.Add(1)
@@ -184,6 +189,21 @@ func (sp *sessionVideoPipeline) trackLoss(st video.Stats, atMs int64) {
 	if !st.WaitingForIDR { // bắt đầu và hết chờ trong cùng một gói
 		sp.endWait(atMs)
 	}
+}
+
+// trackOversize cộng số frame decoder bỏ vì vượt MaxWidth/MaxHeight. Chỉ log Warn ở lần đầu của
+// session (stream quá lớn thường quá lớn ở mọi frame); số đếm đầy đủ nằm ở metric. Gọi dưới sp.mu.
+func (sp *sessionVideoPipeline) trackOversize(st video.Stats) {
+	if st.OversizeFrames <= sp.nativeOversize {
+		return
+	}
+	if sp.nativeOversize == 0 {
+		zap.L().Warn("pipeline: video: độ phân giải vượt video.max_width/max_height, bỏ frame",
+			zap.String("session_id", sp.cfg.SessionID),
+			zap.Int("max_width", sp.cfg.MaxWidth), zap.Int("max_height", sp.cfg.MaxHeight))
+	}
+	sp.oversizeFrames.Add(st.OversizeFrames - sp.nativeOversize)
+	sp.nativeOversize = st.OversizeFrames
 }
 
 func (sp *sessionVideoPipeline) endWait(atMs int64) {

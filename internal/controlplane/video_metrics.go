@@ -39,6 +39,7 @@ func (s *Server) videoMetricsWrite(w io.Writer) {
 		write("frames_total", "counter", "Task frames enqueued for video AI (JPEG)", st.Frames)
 		write("frames_dropped_total", "counter", "Video frames dropped from AI input queue", st.FramesDropped)
 		write("decode_errors_total", "counter", "Video decode or JPEG conversion errors", st.DecodeErrors)
+		write("decoder_oversize_frames_total", "counter", "Video frames dropped because the resolution exceeds video.max_width/max_height (either orientation)", st.OversizeFrames)
 		write("decoder_packet_gaps_total", "counter", "Video RTP sequence discontinuities seen by the H264 depacketizer", st.PacketGaps)
 		write("decoder_wait_idr_episodes_total", "counter", "Times a video decoder started waiting for an IDR after packet loss", st.WaitIDREpisodes)
 		write("decoder_wait_idr_dropped_frames_total", "counter", "Complete video access units discarded while waiting for an IDR", st.WaitIDRDroppedFrames)

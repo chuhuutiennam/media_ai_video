@@ -782,7 +782,12 @@ session:
   idle_timeout_sec: 30
   max_sessions: 10000
   per_session_packet_queue: 128
+  reuse_wait_ms: 2000   # session dùng lại ID vừa đóng chờ session cũ giải phóng xong (1..60000)
 ```
+
+Session mới cùng ID (callId dùng lại) chỉ được đăng ký tài nguyên sau khi session cũ dọn xong;
+quá `reuse_wait_ms` thì tạo session lỗi (rollback). Xem
+[giai-phap-sua-loi-video-decoder-session.md](giai-phap-sua-loi-video-decoder-session.md).
 
 ---
 

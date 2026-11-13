@@ -27,6 +27,8 @@ type VideoStats struct {
 	Frames        uint64 // JPEG frames enqueued for AI (before queue eviction)
 	FramesDropped uint64
 	DecodeErrors  uint64 // H264 decode, pixel conversion or JPEG encode errors
+	// Frame bị bỏ vì vượt video.max_width/max_height (không tính vào DecodeErrors)
+	OversizeFrames uint64
 
 	PacketGaps           uint64 // số lần decoder thấy sequence RTP đứt
 	WaitIDREpisodes      uint64 // số đợt chờ IDR do mất gói/AU hỏng
@@ -52,6 +54,7 @@ type VideoWorkerPool struct {
 	frames        atomic.Uint64
 	framesDropped atomic.Uint64
 	decodeErrors  atomic.Uint64
+	oversize      atomic.Uint64
 
 	packetGaps, waitEpisodes, waitDrops, waitMs atomic.Uint64
 }
@@ -160,7 +163,9 @@ func (wp *VideoWorkerPool) worker(ctx context.Context, shard chan VideoJob) {
 			// UnregisterSession without retaining closed decoders or session IDs.
 			frames, dropped, errors := sp.framesOut.Load(), sp.framesDropped.Load(), sp.decodeErrs.Load()
 			gaps, episodes, waitDrops, waitMs := sp.packetGaps.Load(), sp.waitEpisodes.Load(), sp.waitDrops.Load(), sp.waitMs.Load()
+			oversize := sp.oversizeFrames.Load()
 			sp.push(job.Packet)
+			wp.oversize.Add(sp.oversizeFrames.Load() - oversize)
 			wp.frames.Add(sp.framesOut.Load() - frames)
 			wp.framesDropped.Add(sp.framesDropped.Load() - dropped)
 			wp.decodeErrors.Add(sp.decodeErrs.Load() - errors)
@@ -183,6 +188,7 @@ func (wp *VideoWorkerPool) Stats() VideoStats {
 		FramesDropped: wp.framesDropped.Load(),
 		DecodeErrors:  wp.decodeErrors.Load(),
 
+		OversizeFrames:       wp.oversize.Load(),
 		PacketGaps:           wp.packetGaps.Load(),
 		WaitIDREpisodes:      wp.waitEpisodes.Load(),
 		WaitIDRDroppedFrames: wp.waitDrops.Load(),

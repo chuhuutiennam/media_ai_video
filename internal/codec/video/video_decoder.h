@@ -57,7 +57,7 @@ typedef struct {
 typedef struct {
     size_t max_nalu_size;
     size_t max_access_unit_size;
-    int    max_width;
+    int    max_width;            /* giới hạn theo khung, không phân biệt ngang/dọc; vượt → bỏ frame, đếm oversize_frames */
     int    max_height;
     int    max_ready_frames;
     /* Mất gói luôn bỏ mọi slice tới IDR kế tiếp (không có cờ tắt). */
@@ -78,6 +78,7 @@ typedef struct {
     uint64_t conversion_errors;
     uint64_t wait_idr_episodes;      /* số lần bắt đầu chờ IDR do mất gói/AU hỏng (không tính đầu stream) */
     int      waiting_for_idr;        /* 1 = đang chờ IDR (kể cả đầu stream) */
+    uint64_t oversize_frames;        /* frame bị bỏ vì vượt max_width/max_height (không tính vào decode_errors) */
 } VideoDecoderStats;
 
 VideoDecoderHandle video_decoder_create(void);

@@ -33,6 +33,7 @@ data:
       per_session_packet_queue: 128
       per_session_audio_queue: 128
       per_session_result_queue: 64
+      reuse_wait_ms: 2000
 
     pipeline:
       audio_worker_count: 16

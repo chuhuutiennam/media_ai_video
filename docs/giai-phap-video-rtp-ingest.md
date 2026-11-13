@@ -100,6 +100,7 @@ Coordinator dùng `VideoJitterConfig` / `VideoJitterOutSize` cho video; session 
 | `media_ai_video_decoder_wait_idr_dropped_frames_total` | counter | AU đã ghép xong nhưng bị bỏ khi chờ IDR (frame mất ≈ giá trị này + AU hỏng) |
 | `media_ai_video_decoder_wait_idr_ms_total` | counter | Tổng ms chờ IDR (giờ nhận gói); chia cho episodes ra trung bình |
 | `media_ai_video_decoder_sessions_waiting_idr` | gauge | Session đang chờ IDR do mất gói |
+| `media_ai_video_decoder_oversize_frames_total` | counter | (2026-11-13) Frame bị bỏ vì vượt `video.max_width/max_height`; xem [giai-phap-sua-loi-video-decoder-session.md](giai-phap-sua-loi-video-decoder-session.md) |
 
 Lưu ý: khi seq nhảy tiến lớn (đổi SSRC), `jitter_lost_total` tăng đúng bằng số seq bị bỏ qua.
 

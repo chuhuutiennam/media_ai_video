@@ -130,6 +130,9 @@ type SessionSection struct {
 	PerSessionAudioQueue  int `yaml:"per_session_audio_queue"`
 	PerSessionResultQueue int `yaml:"per_session_result_queue"`
 	PerSessionEgressQueue int `yaml:"per_session_egress_queue"` // egress pacer buffer (frames); 200 frame = 4s tại 20ms/frame
+	// Session mới dùng lại ID (callId) của session vừa đóng phải chờ session cũ giải phóng xong
+	// tài nguyên (callback, pool, AI stream) — tối đa N ms, quá thì tạo session mới lỗi. 1..60000.
+	ReuseWaitMs int `yaml:"reuse_wait_ms"`
 }
 
 // PipelineSection cấu hình audio worker pool và jitter buffer.
@@ -306,6 +309,7 @@ func Default() GatewayConfig {
 			PerSessionAudioQueue:  128,
 			PerSessionResultQueue: 64,
 			PerSessionEgressQueue: 200, // 200 × 20ms = 4s — đủ cover utterance dài nhất thực tế
+			ReuseWaitMs:           2000,
 		},
 		Pipeline: PipelineSection{
 			AudioWorkerCount:   16, // unused — per-session goroutine model; kept for config compat
@@ -467,6 +471,9 @@ func Load(path string) (GatewayConfig, error) {
 	if cfg.RTP.EvenPorts && cfg.RTP.PortStart > 0 && cfg.RTP.PortStart%2 != 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_start must be even when rtp.even_ports=true (RTP even, RTCP = RTP+1), got %d", cfg.RTP.PortStart)
 	}
+	if v := cfg.Session.ReuseWaitMs; v < 1 || v > 60000 {
+		return GatewayConfig{}, fmt.Errorf("session.reuse_wait_ms must be 1..60000, got %d", v)
+	}
 	if cfg.RTP.PortReuseDelayMs < 0 {
 		return GatewayConfig{}, fmt.Errorf("rtp.port_reuse_delay_ms must be >= 0, got %d", cfg.RTP.PortReuseDelayMs)
 	}
@@ -607,6 +614,7 @@ func (c GatewayConfig) ToCoordinatorConfig() coordinator.Config {
 		CallbackRetryBackoff: time.Duration(c.Callback.RetryBackoffMs) * time.Millisecond,
 		GestureKeywords:      c.Callback.GestureKeywords,
 		PCMDumpDir:           c.Audio.PCMDumpDir,
+		SessionReuseWait:     time.Duration(c.Session.ReuseWaitMs) * time.Millisecond,
 
 		VideoJitterConfig: videoJitter, VideoJitterOutSize: videoJitterOut,
 		VideoMaxWidth: c.Video.MaxWidth, VideoMaxHeight: c.Video.MaxHeight,

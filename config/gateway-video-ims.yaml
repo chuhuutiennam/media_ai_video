@@ -66,6 +66,7 @@ session:
   idle_timeout_sec:         60      # gói RTP video cũng tính là hoạt động
   gc_interval_sec:          10
   per_session_packet_queue: 1024    # audio; video dùng video.jitter.packet_queue_size
+  reuse_wait_ms:            2000    # callId dùng lại ngay: chờ session cũ giải phóng xong tối đa N ms (1..60000)
 
 # ── Jitter audio (video dùng video.jitter bên dưới; tắt video.jitter thì video dùng chung mục này)
 pipeline:

@@ -14,7 +14,7 @@ VideoStreamDecoder::~VideoStreamDecoder() {
 
 bool VideoStreamDecoder::Open() {
     if (opened_) return true;
-    if (!decoder_.Open()) return false;
+    if (!decoder_.Open(config_.max_width, config_.max_height)) return false;
     opened_ = true;
     return true;
 }
@@ -78,18 +78,23 @@ VideoStatus VideoStreamDecoder::PushRtp(
         if (au.key_frame) stats_.idr_frames++;
 
         uint64_t ext_ts = ts_tracker_.Extend(au.rtp_timestamp);
-        int64_t  ts_ms  = ts_tracker_.ToMilliseconds(ext_ts);
 
+        uint64_t oversize = 0;
         DecodeStatus ds = decoder_.Decode(
             au.data.data(), static_cast<int>(au.data.size()),
-            static_cast<int64_t>(ext_ts));
+            static_cast<int64_t>(ext_ts), &oversize);
+        stats_.oversize_frames += oversize;
 
+        if (ds == DecodeStatus::Oversize) {
+            stats_.oversize_frames++;
+            continue;
+        }
         if (ds != DecodeStatus::OK) {
             stats_.decode_errors++;
             continue;
         }
 
-        DrainDecoder(au.rtp_timestamp, ext_ts, ts_ms);
+        DrainDecoder();
     }
 
     return (seq_gap || ps == ParseStatus::PacketGap) ? VIDEO_PACKET_GAP : VIDEO_OK;
@@ -103,15 +108,16 @@ VideoDecoderStats VideoStreamDecoder::GetStats() const {
     return s;
 }
 
-void VideoStreamDecoder::DrainDecoder(
-    uint32_t rtp_ts, uint64_t ext_ts, int64_t ts_ms)
-{
+void VideoStreamDecoder::DrainDecoder() {
     OwnedDecodedFrame frame;
     while (decoder_.PopFrame(frame)) {
+        // Decoder có thể trả frame của AU gửi từ trước (B-frame/reorder): timestamp lấy theo
+        // pts của chính frame (= extended RTP ts của AU sinh ra nó), không theo AU vừa gửi.
+        const uint64_t ext_ts        = static_cast<uint64_t>(frame.av_pts);
         frame.frame_id               = next_frame_id_++;
-        frame.rtp_timestamp          = rtp_ts;
+        frame.rtp_timestamp          = static_cast<uint32_t>(ext_ts);
         frame.extended_rtp_timestamp = ext_ts;
-        frame.timestamp_ms           = ts_ms;
+        frame.timestamp_ms           = ts_tracker_.ToMilliseconds(ext_ts);
 
         if (static_cast<int>(ready_frames_.size()) >= config_.max_ready_frames) {
             ready_frames_.pop_front(); // drop oldest; fresh frame preferred

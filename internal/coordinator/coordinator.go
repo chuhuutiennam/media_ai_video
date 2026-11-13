@@ -33,6 +33,9 @@ type Config struct {
 	GestureKeywords      result.GestureKeywordConfig
 	PCMDumpDir           string                     // nếu non-empty, ghi decoded PCM vào thư mục này (debug)
 	CallbackClient       *result.CallbackHTTPClient // shared H/2 client; nil = per-sink transport (backward compat)
+	// SessionReuseWait: Start/StartVideo của session dùng lại ID chờ session cũ cùng ID giải phóng
+	// xong tối đa chừng này (config session.reuse_wait_ms); 0 = defaultSessionReuseWait.
+	SessionReuseWait time.Duration
 
 	// Jitter của track video (config video.jitter). VideoJitterConfig.PacketTimeMs == 0 → dùng
 	// JitterConfig/JitterOutSize như audio.
@@ -109,6 +112,21 @@ type Coordinator struct {
 	mu          sync.RWMutex
 	videoJitter jitter.Counters
 	jitterBufs  map[string]*jitter.Buffer // sessionID → active jitter buffer
+
+	// Vòng đời theo instance session: tài nguyên ở dispatcher/pool/AI đều gắn theo sess.ID, nên
+	// session mới cùng ID chỉ được đăng ký sau khi session cũ dọn xong (xem acquireLife).
+	lifeMu sync.Mutex
+	lives  map[string]*sessionLife // sessionID → instance gần nhất còn chạy hoặc đang dọn
+}
+
+// defaultSessionReuseWait dùng khi Config.SessionReuseWait = 0 (khớp mặc định session.reuse_wait_ms).
+const defaultSessionReuseWait = 2 * time.Second
+
+// sessionLife theo dõi một instance session (một lần Create) cho tới khi dọn xong.
+type sessionLife struct {
+	sess    *session.Session
+	pending int           // phần dọn dẹp (Start, StartVideo) chưa xong; protected by Coordinator.lifeMu
+	done    chan struct{} // đóng khi pending về 0
 }
 
 // WithVideo gắn Video Worker Pool + Video AI Manager vào Coordinator.
@@ -126,6 +144,77 @@ func New(cfg Config, pool *pipeline.WorkerPool, aiMgr *ai.Manager, dispatcher *r
 		aiMgr:      aiMgr,
 		dispatcher: dispatcher,
 		jitterBufs: make(map[string]*jitter.Buffer),
+		lives:      make(map[string]*sessionLife),
+	}
+}
+
+// acquireLife giữ một phần dọn dẹp cho sess, gọi ở đầu Start/StartVideo trước khi đăng ký bất kỳ
+// tài nguyên nào. Nếu ID đang thuộc instance trước (đã đóng, chưa dọn xong) thì chờ tối đa
+// SessionReuseWait: dọn dẹp của instance cũ chỉ theo sess.ID, chạy sau khi instance mới đã đăng
+// ký sẽ xoá callback, đóng AI stream, gỡ pipeline của instance mới. release phải gọi đúng một
+// lần khi phần dọn dẹp tương ứng xong, hoặc khi Start/StartVideo lỗi và đã rollback.
+func (c *Coordinator) acquireLife(sess *session.Session) (release func(), err error) {
+	wait := c.cfg.SessionReuseWait
+	if wait <= 0 {
+		wait = defaultSessionReuseWait
+	}
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	for {
+		c.lifeMu.Lock()
+		life := c.lives[sess.ID]
+		if life == nil || life.sess == sess {
+			if sess.Ctx.Err() != nil {
+				c.lifeMu.Unlock()
+				return nil, fmt.Errorf("coordinator: session %s already closed", sess.ID)
+			}
+			if life == nil {
+				life = &sessionLife{sess: sess, done: make(chan struct{})}
+				c.lives[sess.ID] = life
+			}
+			life.pending++
+			c.lifeMu.Unlock()
+			return c.lifeRelease(life), nil
+		}
+		prev := life
+		c.lifeMu.Unlock()
+
+		if prev.sess.Ctx.Err() == nil {
+			return nil, fmt.Errorf("coordinator: session ID %s is still used by another live session", sess.ID)
+		}
+		if timer == nil {
+			timer = time.NewTimer(wait)
+			zap.L().Debug("coordinator: waiting for previous session with the same ID to release resources",
+				zap.String("session_id", sess.ID))
+		}
+		select {
+		case <-prev.done:
+		case <-timer.C:
+			zap.L().Warn("coordinator: previous session with the same ID did not release resources in time",
+				zap.String("session_id", sess.ID), zap.Duration("waited", wait))
+			return nil, fmt.Errorf("coordinator: session %s: previous session with the same ID still releasing after %s", sess.ID, wait)
+		}
+	}
+}
+
+func (c *Coordinator) lifeRelease(life *sessionLife) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			c.lifeMu.Lock()
+			defer c.lifeMu.Unlock()
+			life.pending--
+			if life.pending == 0 {
+				close(life.done)
+				if c.lives[life.sess.ID] == life {
+					delete(c.lives, life.sess.ID)
+				}
+			}
+		})
 	}
 }
 
@@ -135,7 +224,11 @@ func New(cfg Config, pool *pipeline.WorkerPool, aiMgr *ai.Manager, dispatcher *r
 //  3. Mở AI stream (audioIn=AudioQueue, resultOut=ResultQueue)
 //  4. Jitter pump: PacketQueue → jitter buffer → WorkerPool.Submit
 //  5. Result pump: ResultQueue → Dispatcher.Push
-//  6. Cleanup goroutine: sau sess.Ctx.Done → UnregisterSession + UnregisterSinks
+//  6. Cleanup goroutine: sau sess.Ctx.Done → UnregisterSession + đóng AI stream + chờ result pump
+//     + UnregisterSinks
+//
+// Session dùng lại ID của session vừa đóng: Start chờ session cũ dọn xong (tối đa
+// SessionReuseWait) rồi mới đăng ký, vì mọi tài nguyên ở trên gắn theo sess.ID.
 //
 // Rollback: nếu bước 2 hoặc 3 thất bại, mọi đăng ký đã thực hiện đều được hoàn tác.
 // Khi Start trả về nil, toàn bộ goroutine đã chạy và pipeline sẵn sàng nhận packet.
@@ -144,6 +237,12 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 	streamID := sess.ID
 	if sess.TrackID != "" {
 		streamID = sess.TrackID
+	}
+
+	// 0. Session cũ cùng ID (callId dùng lại) phải dọn xong trước khi đăng ký gì cho session này.
+	release, err := c.acquireLife(sess)
+	if err != nil {
+		return nil, err
 	}
 
 	// 1. HTTP callback sink.
@@ -171,6 +270,7 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 		}
 		if err := c.pool.RegisterSession(sess.Ctx, poolCfg, sess.AudioQueue); err != nil {
 			c.dispatcher.UnregisterSinks(sess.ID)
+			release()
 			return nil, err
 		}
 
@@ -181,6 +281,7 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 		); err != nil {
 			c.pool.UnregisterSession(sess.ID)
 			c.dispatcher.UnregisterSinks(sess.ID)
+			release()
 			return nil, err
 		}
 
@@ -189,22 +290,31 @@ func (c *Coordinator) Start(sess *session.Session) (*result.HTTPCallbackSink, er
 	}
 
 	// 5. Result pump goroutine, luôn chạy dù audio hay video-only.
-	go c.resultPump(sess)
+	var pumps sync.WaitGroup
+	pump := func(input <-chan pipeline.RecognitionResult) {
+		pumps.Add(1)
+		go func() { defer pumps.Done(); c.pumpResults(sess, input) }()
+	}
+	pump(sess.ResultQueue)
 	if sess.VideoEnabled {
-		go c.pumpResults(sess, sess.VideoMaskResultQueue)
-		go c.pumpResults(sess, sess.GestureResultQueue)
+		pump(sess.VideoMaskResultQueue)
+		pump(sess.GestureResultQueue)
 	}
 
-	// 6. Cleanup sau khi session đóng.
+	// 6. Cleanup sau khi session đóng. Dọn xong (kể cả AI stream audio và result pump của session
+	// này) mới release, để session mới cùng ID không bị dọn nhầm và không nhận kết quả cũ.
 	go func() {
 		<-sess.Ctx.Done()
 		if sess.Codec != "" {
 			c.pool.UnregisterSession(sess.ID)
+			c.aiMgr.Close(sess.ID) // gỡ khỏi Manager ngay; session mới cùng ID không bị ErrDuplicateStream
 		}
+		pumps.Wait()
 		c.dispatcher.UnregisterSinks(sess.ID)
 		c.mu.Lock()
 		delete(c.jitterBufs, sess.ID)
 		c.mu.Unlock()
+		release()
 	}()
 
 	return cbSink, nil
@@ -298,7 +408,13 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		}
 		source.InputFPS = int(poolCfg.InferFPS)
 	}
+	// Như Start: không đăng ký gì khi session cũ cùng ID chưa dọn xong.
+	release, err := c.acquireLife(sess)
+	if err != nil {
+		return err
+	}
 	if err := c.videoPool.RegisterSession(sess.Ctx, poolCfg, sess.VideoFrameQueue); err != nil {
+		release()
 		return fmt.Errorf("coordinator: register video session: %w", err)
 	}
 
@@ -315,11 +431,13 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 			MediaEpoch: fmt.Sprintf("%s-%d", streamID, sess.CreatedAt.UnixNano()), GestureResultOut: sess.GestureResultQueue}
 		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, streamID, cfg, sess.VideoFrameQueue, sess.VideoMaskResultQueue); err != nil {
 			c.videoPool.UnregisterSession(sess.ID)
+			release()
 			return fmt.Errorf("coordinator: open source stream: %w", err)
 		}
 	} else if !gestureOnly {
 		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, streamID, streamCfg, sess.VideoFrameQueue, sess.VideoMaskResultQueue); err != nil {
 			c.videoPool.UnregisterSession(sess.ID)
+			release()
 			return fmt.Errorf("coordinator: open video AI stream: %w", err)
 		}
 	}
@@ -328,6 +446,7 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		if _, err := c.videoAI.Open(sess.Ctx, sess.ID, gestureStream, cfg, gestureQueue, sess.GestureResultQueue); err != nil {
 			c.videoAI.Close(sess.ID)
 			c.videoPool.UnregisterSession(sess.ID)
+			release()
 			return fmt.Errorf("coordinator: open gesture task: %w", err)
 		}
 	}
@@ -341,6 +460,7 @@ func (c *Coordinator) StartVideo(sess *session.Session) error {
 		c.mu.Lock()
 		delete(c.jitterBufs, sess.ID)
 		c.mu.Unlock()
+		release()
 	}()
 
 	return nil
@@ -467,10 +587,6 @@ func (c *Coordinator) startJitterPump(sess *session.Session) {
 			}
 		}
 	}()
-}
-
-func (c *Coordinator) resultPump(sess *session.Session) {
-	c.pumpResults(sess, sess.ResultQueue)
 }
 
 func (c *Coordinator) pumpResults(sess *session.Session, input <-chan pipeline.RecognitionResult) {

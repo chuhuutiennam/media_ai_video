@@ -31,7 +31,7 @@ public:
     VideoDecoderStats GetStats() const;
 
 private:
-    void DrainDecoder(uint32_t rtp_ts, uint64_t ext_ts, int64_t ts_ms);
+    void DrainDecoder();
 
     VideoDecoderConfig config_;
     VideoDecoderStats  stats_ = {};

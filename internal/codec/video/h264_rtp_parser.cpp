@@ -166,16 +166,22 @@ ParseStatus H264RtpParser::HandleFuA(
     bool    end          = (fu_header >> 6) & 1;
     uint8_t recon_nal    = (fu_indicator & 0xE0) | (fu_header & 0x1F);
 
+    // max_nalu_size_ được kiểm tra trước MỖI lần ghép mảnh, không đợi mảnh cuối:
+    // mảnh cuối có thể không bao giờ đến, khi đó fu_buffer_ sẽ tăng không giới hạn.
+    // Vượt giới hạn → bỏ NAL và AU hiện tại, chờ IDR (như NAL quá lớn trong AppendNAL).
     if (start) {
         AbortFuA(); // discard any incomplete prior fragment
-        fu_buffer_.clear();
+        if (has_timestamp_ && ts != current_timestamp_) FlushCurrentAccessUnit();
+        if (!has_timestamp_) StartAccessUnit(ts);
+
+        if (size - 1 > max_nalu_size_) { // 1 byte NAL header dựng lại + phần payload
+            MarkCurrentAUCorrupted();
+            return ParseStatus::SizeExceeded;
+        }
         fu_buffer_.push_back(recon_nal);
         if (size > 2) fu_buffer_.insert(fu_buffer_.end(), payload + 2, payload + size);
         fu_in_progress_  = true;
         expected_fu_seq_ = static_cast<uint16_t>(seq + 1);
-
-        if (has_timestamp_ && ts != current_timestamp_) FlushCurrentAccessUnit();
-        if (!has_timestamp_) StartAccessUnit(ts);
     } else {
         if (!fu_in_progress_) {
             // Mid-fragment arrived without a start → previous start was lost
@@ -186,6 +192,11 @@ ParseStatus H264RtpParser::HandleFuA(
             AbortFuA();
             MarkCurrentAUCorrupted();
             return ParseStatus::PacketGap;
+        }
+        if (size - 2 > max_nalu_size_ - fu_buffer_.size()) { // fu_buffer_.size() <= max_nalu_size_
+            AbortFuA();
+            MarkCurrentAUCorrupted();
+            return ParseStatus::SizeExceeded;
         }
         if (size > 2) fu_buffer_.insert(fu_buffer_.end(), payload + 2, payload + size);
         expected_fu_seq_ = static_cast<uint16_t>(seq + 1);

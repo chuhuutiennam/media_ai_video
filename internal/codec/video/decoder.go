@@ -94,11 +94,14 @@ type Stats struct {
 	ConversionErrors     uint64
 	WaitIDREpisodes      uint64 // số lần bắt đầu chờ IDR do mất gói/AU hỏng (không tính đầu stream)
 	WaitingForIDR        bool   // đang chờ IDR (kể cả đầu stream)
+	OversizeFrames       uint64 // frame bị bỏ vì vượt MaxWidth/MaxHeight (không tính vào DecodeErrors)
 }
 
 // Config khớp VideoDecoderConfig. Numeric fields set to zero retain C++
 // defaults, including when other fields (such as dimensions) are overridden.
 // Mất gói luôn bỏ mọi slice tới IDR kế tiếp (không có cờ tắt).
+// MaxWidth/MaxHeight là khung giới hạn không phân biệt ngang/dọc (cạnh dài ≤ cạnh dài
+// giới hạn, cạnh ngắn ≤ cạnh ngắn giới hạn); frame vượt bị bỏ, đếm ở Stats.OversizeFrames.
 type Config struct {
 	MaxNALUSize         int
 	MaxAccessUnitSize   int
@@ -235,6 +238,7 @@ func (d *Decoder) Stats() Stats {
 		ConversionErrors:     uint64(s.conversion_errors),
 		WaitIDREpisodes:      uint64(s.wait_idr_episodes),
 		WaitingForIDR:        s.waiting_for_idr != 0,
+		OversizeFrames:       uint64(s.oversize_frames),
 	}
 }
 

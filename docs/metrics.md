@@ -305,6 +305,7 @@ Các counter `media_ai_jitter_*` cũ không bao phủ video jitter. Gateway bổ
 | decoder_wait_idr_dropped_frames_total | AU đã ghép xong nhưng bị bỏ vì đang chờ IDR; frame mất mỗi lần ≈ giá trị này + AU hỏng |
 | decoder_wait_idr_ms_total | Tổng ms chờ IDR, tính theo giờ nhận gói tại listener; chia cho `decoder_wait_idr_episodes_total` ra thời gian đứng hình trung bình |
 | decoder_sessions_waiting_idr | Gauge: số session đang chờ IDR sau khi mất gói |
+| decoder_oversize_frames_total | Frame bị bỏ vì độ phân giải vượt `video.max_width`/`max_height` (so theo khung, không phân biệt ngang/dọc). Không tính vào `decode_errors_total`. Lần đầu mỗi session có log WARN `pipeline: video: độ phân giải vượt video.max_width/max_height, bỏ frame` |
 
 Counter này được giữ trong vòng đời server/coordinator, không giữ reference tới
 session đã đóng. Không cộng lost và dropped như hai tập packet độc lập. Đối chiếu

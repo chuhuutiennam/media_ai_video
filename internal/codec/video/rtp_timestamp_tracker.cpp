@@ -27,7 +27,9 @@ uint64_t RtpTimestampTracker::Extend(uint32_t rtp_ts) {
 }
 
 int64_t RtpTimestampTracker::ToMilliseconds(uint64_t extended_ts) const {
-    if (!base_set_) return 0;
+    // Frame ra theo thứ tự hiển thị có thể mang ts nhỏ hơn AU đầu tiên (khi đó base) → 0,
+    // không để phép trừ unsigned quay vòng thành số rất lớn.
+    if (!base_set_ || extended_ts < base_extended_) return 0;
     uint64_t delta = extended_ts - base_extended_;
     return static_cast<int64_t>(delta * 1000 / kRtpClockHz);
 }

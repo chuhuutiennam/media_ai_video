@@ -1,4 +1,5 @@
 #include "h264_decoder.h"
+#include <algorithm>
 #include <mutex>
 
 extern "C" {
@@ -11,8 +12,14 @@ H264Decoder::~H264Decoder() {
     Close();
 }
 
-bool H264Decoder::Open() {
+bool H264Decoder::Open(int max_width, int max_height) {
     if (opened_) return true;
+
+    max_long_ = max_short_ = 0;
+    if (max_width > 0 && max_height > 0) {
+        max_long_  = std::max(max_width, max_height);
+        max_short_ = std::min(max_width, max_height);
+    }
 
     #if LIBAVCODEC_VERSION_MAJOR < 58
         static std::once_flag register_once;
@@ -28,6 +35,12 @@ bool H264Decoder::Open() {
     if (!codec_ctx_) return false;
 
     codec_ctx_->pkt_timebase = AVRational{1, 90000};
+    if (max_long_ > 0) {
+        // Chặn libavcodec cấp phát/decode frame quá lớn. FFmpeg so max_pixels với kích thước đã
+        // căn lề (coded size bội 16/32, stride bội tới 64), theo cả hai hướng → nới mỗi cạnh lên
+        // bội 64 để stream hợp lệ không bị chặn nhầm; giới hạn chính xác do Exceeds() kiểm tra.
+        codec_ctx_->max_pixels = static_cast<int64_t>(FFALIGN(max_long_, 64)) * FFALIGN(max_short_, 64);
+    }
 
     if (avcodec_open2(codec_ctx_, codec_, nullptr) < 0) {
         avcodec_free_context(&codec_ctx_);
@@ -60,7 +73,13 @@ void H264Decoder::Flush() {
     frame_queue_.clear();
 }
 
-DecodeStatus H264Decoder::Decode(const uint8_t* data, int size, int64_t pts_ext_ts) {
+bool H264Decoder::Exceeds(int width, int height) const {
+    if (max_long_ <= 0 || width <= 0 || height <= 0) return false;
+    return std::max(width, height) > max_long_ || std::min(width, height) > max_short_;
+}
+
+DecodeStatus H264Decoder::Decode(const uint8_t* data, int size, int64_t pts_ext_ts,
+                                 uint64_t* oversize_dropped) {
     if (!opened_) return DecodeStatus::NotOpened;
 
     av_packet_unref(av_packet_);
@@ -71,12 +90,24 @@ DecodeStatus H264Decoder::Decode(const uint8_t* data, int size, int64_t pts_ext_
     av_packet_->dts  = AV_NOPTS_VALUE;
 
     int ret = avcodec_send_packet(codec_ctx_, av_packet_);
-    if (ret < 0 && ret != AVERROR(EAGAIN)) return DecodeStatus::SendError;
+    if (ret < 0 && ret != AVERROR(EAGAIN)) {
+        // max_pixels làm libavcodec từ chối frame; kích thước SPS vẫn nằm trong codec_ctx_
+        // (đã kiểm chứng với libavcodec 62) → phân biệt "quá lớn" với lỗi decode thường.
+        return Exceeds(codec_ctx_->width, codec_ctx_->height) ? DecodeStatus::Oversize
+                                                              : DecodeStatus::SendError;
+    }
 
     while (true) {
         ret = avcodec_receive_frame(codec_ctx_, av_frame_);
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
         if (ret < 0) return DecodeStatus::ReceiveError;
+
+        // Lọt qua max_pixels (giới hạn theo diện tích, có nới) nhưng vượt một cạnh → bỏ trước khi copy.
+        if (Exceeds(av_frame_->width, av_frame_->height)) {
+            if (oversize_dropped) ++*oversize_dropped;
+            av_frame_unref(av_frame_);
+            continue;
+        }
 
         OwnedDecodedFrame owned;
         CopyFrameToOwned(av_frame_, pts_ext_ts, owned);
@@ -102,9 +133,12 @@ void H264Decoder::CopyFrameToOwned(AVFrame* f, int64_t pts_ext_ts, OwnedDecodedF
     out.width  = f->width;
     out.height = f->height;
 
-    // best_effort_timestamp for correct display order in streams with B-frames
-    int64_t pts = f->best_effort_timestamp;
-    if (pts == AV_NOPTS_VALUE || pts <= 0) pts = pts_ext_ts;
+    // pts của frame = pts của packet (extended RTP ts của AU) sinh ra nó; libavcodec giữ nguyên
+    // qua reorder B-frame, nên frame ra trễ vẫn mang đúng timestamp của mình. Chỉ khi thiếu pts
+    // mới dùng AU vừa gửi. 0 là timestamp hợp lệ (RTP ts có thể bắt đầu từ 0).
+    int64_t pts = f->pts;
+    if (pts == AV_NOPTS_VALUE) pts = f->best_effort_timestamp;
+    if (pts == AV_NOPTS_VALUE || pts < 0) pts = pts_ext_ts;
     out.av_pts = pts;
 
     AVPixelFormat fmt = static_cast<AVPixelFormat>(f->format);
